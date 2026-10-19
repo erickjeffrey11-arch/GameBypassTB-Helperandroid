@@ -420,7 +420,6 @@ class GameBypassService : AccessibilityService() {
             layoutParams = LinearLayout.LayoutParams(0, stripHeight(), 1f)
         }
         bar.addView(status)
-        bar.addView(invisibleButton("Describe") { describeFocused() })
         bar.addView(invisibleButton("Rescan") {
             currentTexts = emptySet()
             emptyScans = 0
@@ -436,16 +435,6 @@ class GameBypassService : AccessibilityService() {
             bar.addView(invisibleButton("End turn") { endTurn() })
             bar.addView(invisibleButton("Save screen for help") { saveScreenForHelp() })
         }
-        bar.addView(invisibleButton("Never use Game Bypass in this app") {
-            currentPackage?.let { pkg ->
-                addToList("never", pkg)
-                val always = appList("always")
-                if (pkg in always) appPrefs.edit().putStringSet("always", always - pkg).apply()
-            }
-            turnOff(announce = false)
-            setStatus("Game Bypass won't turn on in this app anymore. You can change that in the Game Bypass app.")
-            handler.postDelayed(removeBarRunnable, 3000)
-        })
         bar.addView(invisibleButton("Pause Game Bypass for this game") {
             pausedPackage = currentPackage
             turnOff(announce = true)
