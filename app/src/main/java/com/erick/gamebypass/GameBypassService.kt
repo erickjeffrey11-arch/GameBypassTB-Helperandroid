@@ -6,7 +6,9 @@ import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.media.AudioAttributes
 import android.media.AudioManager
+import android.speech.tts.TextToSpeech
 import android.media.ToneGenerator
 import android.graphics.Color
 import android.graphics.Path
@@ -80,6 +82,11 @@ class GameBypassService : AccessibilityService() {
     private var scaleY = 1f
     private var focusedView: View? = null
 
+    // Our own voice for direct touch. TalkBack stops talking whenever you touch
+    // the screen; this voice doesn't, so you hear instructions while you play.
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+
     // Direct touch: words already spoken, and when, so we don't repeat them.
     private val spokenAt = mutableMapOf<String, Long>()
 
@@ -113,6 +120,17 @@ class GameBypassService : AccessibilityService() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         ignoredPackages.add(packageName)
         ignoredPackages.addAll(findHomePackages())
+        tts = TextToSpeech(this) { status ->
+            ttsReady = status == TextToSpeech.SUCCESS
+            if (ttsReady) {
+                tts?.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+            }
+        }
         Log.i(tag, "Connected. Ignoring: $ignoredPackages")
     }
 
@@ -126,6 +144,8 @@ class GameBypassService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        tts?.shutdown()
+        tts = null
         turnOff(announce = false)
         removeControlBar()
         handler.removeCallbacksAndMessages(null)
@@ -455,8 +475,13 @@ class GameBypassService : AccessibilityService() {
         val lines = result.textBlocks.flatMap { it.lines }
             .mapNotNull { line ->
                 val box = line.boundingBox ?: return@mapNotNull null
-                val words = line.text.trim()
-                if (words.isEmpty()) return@mapNotNull null
+                val words = cleanText(line.text) ?: return@mapNotNull null
+                // The reader's own "how sure am I" score. Low = probably game art, not words.
+                if (line.confidence in 0f..0.55f) return@mapNotNull null
+                // Tilted text is almost always part of a picture.
+                if (kotlin.math.abs(line.angle) > 25f) return@mapNotNull null
+                // Tiny specks.
+                if (box.height() < 12) return@mapNotNull null
                 if (bar != null && Rect.intersects(bar, box) && box.centerY() > bar.top) return@mapNotNull null
                 Item(words, Rect(
                     (box.left * scaleX).toInt(), (box.top * scaleY).toInt(),
@@ -512,8 +537,45 @@ class GameBypassService : AccessibilityService() {
             }
         }
         if (fresh.isNotEmpty()) {
-            setStatus(fresh.take(3).joinToString(". ") { it.text })
+            speakGame(fresh.take(3).joinToString(". ") { it.text })
         }
+    }
+
+    /** Speaks with our own voice, which your taps can't interrupt. Falls back to TalkBack. */
+    private fun speakGame(text: String) {
+        val engine = tts
+        if (engine != null && ttsReady) {
+            engine.speak(text, TextToSpeech.QUEUE_ADD, null, "game-${System.nanoTime()}")
+        } else {
+            setStatus(text)
+        }
+    }
+
+    /**
+     * Junk text cleanup. Returns cleaned words, or null if it's junk.
+     * Junk = stray symbols, single letters, lines that are mostly symbols,
+     * and long runs of the same character (like "lllll" from a fence or border).
+     */
+    private fun cleanText(raw: String): String? {
+        // Remove symbols that are almost never real words in a game menu.
+        var t = raw.replace(Regex("[|`~^_=<>\\\\{}\\[\\]•·°¦]"), " ")
+        t = t.replace(Regex("\\s+"), " ").trim()
+        // Trim leftover punctuation from the ends, like "- Play ." -> "Play".
+        t = t.trim { !it.isLetterOrDigit() && it != '!' && it != '?' && it != '%' && it != '$' }
+        if (t.isEmpty()) return null
+        val useful = t.count { it.isLetterOrDigit() }
+        if (useful == 0) return null
+        // Mostly symbols.
+        if (useful.toFloat() / t.length < 0.6f) return null
+        // A single letter alone is almost always noise (a single number is kept: levels, counts).
+        if (t.length == 1 && !t[0].isDigit()) return null
+        // Two letters with no vowel and not all capitals, like "lj" or "rn".
+        if (t.length == 2 && t.all { it.isLetter() } && t.none { it.lowercaseChar() in "aeiouy" } &&
+            !t.all { it.isUpperCase() }
+        ) return null
+        // Same character repeated 4+ times, like "IIIII" or "-----".
+        if (Regex("([^0-9])\\1{3,}").containsMatchIn(t)) return null
+        return t
     }
 
     private fun similarity(a: Set<String>, b: Set<String>): Double {
