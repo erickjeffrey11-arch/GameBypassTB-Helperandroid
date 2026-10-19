@@ -5,6 +5,9 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.ContentValues
+import android.os.Environment
+import android.provider.MediaStore
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.ColorMatrix
@@ -33,6 +36,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.erick.gamebypass.HearthstoneBoard.Kind as K
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
@@ -90,6 +94,15 @@ class GameBypassService : AccessibilityService() {
     private val hearthstonePackage = "com.blizzard.wtcg.hearthstone"
     private var profile: String? = null
     private var latestItems: List<Item> = emptyList()
+
+    // Hearthstone match state.
+    private var hsWords: List<HearthstoneBoard.Word> = emptyList()
+    private var hsEntries: List<HearthstoneBoard.Entry> = emptyList()
+    private var hsSelected: HearthstoneBoard.Entry? = null
+    private var hsSignature = ""
+    private var hsInMatch = false
+    private var hsEnemyTurn = false
+    private var focusedKey: String? = null
 
     // Our own voice for direct touch. TalkBack stops talking whenever you touch
     // the screen; this voice doesn't, so you hear instructions while you play.
@@ -346,6 +359,7 @@ class GameBypassService : AccessibilityService() {
         bar.addView(direct)
         if (profile == "hearthstone") {
             bar.addView(invisibleButton("End turn") { endTurn() })
+            bar.addView(invisibleButton("Save screen for help") { saveScreenForHelp() })
         }
         bar.addView(invisibleButton("Pause Game Bypass for this game") {
             pausedPackage = currentPackage
@@ -548,6 +562,8 @@ class GameBypassService : AccessibilityService() {
         }
         emptyScans = 0
 
+        if (profile == "hearthstone" && !directTouch && handleHearthstone(items)) return
+
         if (directTouch) {
             // A menu with words showed up again: go back to reading mode, but only
             // if direct touch was switched on automatically.
@@ -572,7 +588,7 @@ class GameBypassService : AccessibilityService() {
      * so you can just do it. Numbers are ignored when checking for "new", so a
      * score going from 120 to 130 doesn't keep talking.
      */
-    private fun speakNewGameText(items: List<Item>) {
+    private fun speakNewGameText(items: List<Item>, prefix: String = "") {
         val now = System.currentTimeMillis()
         spokenAt.entries.removeAll { now - it.value > 15000 }
         val fresh = items.filter { item ->
@@ -587,7 +603,7 @@ class GameBypassService : AccessibilityService() {
             }
         }
         if (fresh.isNotEmpty()) {
-            speakGame(fresh.take(3).joinToString(". ") { it.text })
+            speakGame(prefix + fresh.take(3).joinToString(". ") { it.text })
         }
     }
 
@@ -675,6 +691,258 @@ class GameBypassService : AccessibilityService() {
         val x = (w * 0.885f).toInt()
         val y = (h * 0.46f).toInt()
         tapAt(Rect(x - 40, y - 20, x + 40, y + 20))
+    }
+
+    // ------------------------------------------------------ Hearthstone
+
+    /** Returns true if this was a Hearthstone match screen and it was handled. */
+    private fun handleHearthstone(items: List<Item>): Boolean {
+        val words = items.map { HearthstoneBoard.Word(it.text, it.rect) }
+        val b = wm.currentWindowMetrics.bounds
+        val entries = HearthstoneBoard.build(words, b.width(), b.height(), hsSelected)
+        if (entries == null) {
+            // Menus, deck builder, shop: normal reading.
+            if (hsInMatch) {
+                hsInMatch = false
+                hsSelected = null
+                hsSignature = ""
+                currentTexts = emptySet()
+            }
+            return false
+        }
+        hsWords = words
+        if (!hsInMatch) {
+            hsInMatch = true
+            currentTexts = emptySet()
+            speakGame("Match. Use headings to jump between your hand, your minions, opponent's minions, heroes, and other.")
+        }
+        val enemy = HearthstoneBoard.isEnemyTurn(words)
+        if (enemy != hsEnemyTurn) {
+            hsEnemyTurn = enemy
+            if (enemy) hsSelected = null
+            speakGame(if (enemy) "Opponent's turn." else "Your turn.")
+        }
+        // Opponent's log: during their turn, say the new words that pop up,
+        // like the name of a card they just played.
+        if (enemy) {
+            speakNewGameText(
+                items.filter { item ->
+                    item.text.any { it.isLetter() } && item.text.length > 3 &&
+                        !Regex("enemy\\s*turn|end\\s*turn|your\\s*turn").containsMatchIn(item.text.lowercase())
+                },
+                prefix = "Opponent: "
+            )
+        }
+        val sig = entries.joinToString("|") { it.label }
+        if (sig != hsSignature) {
+            hsSignature = sig
+            hsEntries = entries
+            buildHearthstone(entries)
+        }
+        return true
+    }
+
+    private fun rebuildHearthstone() {
+        val b = wm.currentWindowMetrics.bounds
+        val entries = HearthstoneBoard.build(hsWords, b.width(), b.height(), hsSelected) ?: return
+        hsEntries = entries
+        hsSignature = entries.joinToString("|") { it.label }
+        buildHearthstone(entries)
+    }
+
+    private fun buildHearthstone(entries: List<HearthstoneBoard.Entry>) {
+        val layer = itemsLayer ?: return
+        layer.removeAllViews()
+        val pad = (4 * resources.displayMetrics.density).toInt()
+        var refocus: View? = null
+        for (e in entries) {
+            val r = e.rect
+            val isHeading = e.kind == HearthstoneBoard.Kind.HEADING
+            val view = View(this).apply {
+                contentDescription = e.label
+                isFocusable = true
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                isAccessibilityHeading = isHeading
+                if (!isHeading) {
+                    isClickable = true
+                    setOnClickListener { activateHearthstone(e) }
+                }
+                accessibilityDelegate = object : View.AccessibilityDelegate() {
+                    override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                        super.onInitializeAccessibilityNodeInfo(host, info)
+                        if (!isHeading) info.className = "android.widget.Button"
+                    }
+
+                    override fun performAccessibilityAction(host: View, action: Int, args: android.os.Bundle?): Boolean {
+                        when (action) {
+                            AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS -> {
+                                focusedKey = e.key
+                                focusedView = host
+                            }
+                            AccessibilityNodeInfo.ACTION_CLICK -> {
+                                if (!isHeading) activateHearthstone(e)
+                                return true
+                            }
+                        }
+                        return super.performAccessibilityAction(host, action, args)
+                    }
+                }
+            }
+            val lp = FrameLayout.LayoutParams(
+                max(r.width(), 8) + pad * 2, max(r.height(), 8) + pad * 2
+            ).apply {
+                leftMargin = r.left - pad - itemsOffset[0]
+                topMargin = r.top - pad - itemsOffset[1]
+            }
+            layer.addView(view, lp)
+            if (e.key == focusedKey) refocus = view
+        }
+        // Keep TalkBack on the same thing after the list changes.
+        refocus?.let { v -> v.post { v.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null) } }
+    }
+
+    private fun shortName(e: HearthstoneBoard.Entry) = e.label.substringBefore(',')
+
+    /** Select, then confirm. Everything in a Hearthstone match goes through here. */
+    private fun activateHearthstone(e: HearthstoneBoard.Entry) {
+        val now = System.currentTimeMillis()
+        if (now - lastTapAt < 400) return // one double tap can arrive twice
+
+        val sel = hsSelected
+        fun select(message: String) {
+            lastTapAt = now
+            hsSelected = e
+            setStatus(message)
+            rebuildHearthstone()
+        }
+        fun cancel() {
+            lastTapAt = now
+            hsSelected = null
+            setStatus("Cancelled.")
+            rebuildHearthstone()
+        }
+        fun move(from: HearthstoneBoard.Entry, to: Rect, message: String) {
+            hsSelected = null
+            setStatus(message)
+            dragFrom(from.rect, to)
+        }
+        when (e.kind) {
+            K.HEADING -> {}
+            K.OTHER -> tapAt(e.rect)
+            K.CANCEL -> cancel()
+            K.HAND_CARD -> when {
+                sel?.key == e.key -> {
+                    // Second double tap on the same card: play it (at the right end of your minions).
+                    val spot = hsEntries.firstOrNull { it.key == "drop-right" || it.key == "drop-center" }?.rect
+                        ?: Rect(0, 0, 0, 0).also { r ->
+                            val b = wm.currentWindowMetrics.bounds
+                            r.set(b.width() / 2 - 20, (b.height() * 0.56f).toInt() - 20, b.width() / 2 + 20, (b.height() * 0.56f).toInt() + 20)
+                        }
+                    move(e, spot, "Playing ${shortName(e)}.")
+                }
+                else -> select("${shortName(e)}. Summon? Double tap again to play it, or choose a spot or a target.")
+            }
+            K.MY_MINION, K.MY_HERO -> when {
+                sel?.key == e.key -> cancel()
+                sel != null && (sel.kind == K.HAND_CARD || sel.kind == K.HERO_POWER) ->
+                    move(sel, e.rect, "${shortName(sel)} on ${shortName(e)}.")
+                else -> select("${shortName(e)} selected. Choose a target.")
+            }
+            K.ENEMY_MINION, K.ENEMY_HERO -> {
+                if (sel == null) {
+                    setStatus("Select one of your minions, a card, or your Hero Power first.")
+                } else {
+                    val verb = if (sel.kind == K.MY_MINION || sel.kind == K.MY_HERO) "attacks" else "on"
+                    move(sel, e.rect, "${shortName(sel)} $verb ${shortName(e)}.")
+                }
+            }
+            K.HERO_POWER -> when {
+                sel?.key == e.key -> {
+                    hsSelected = null
+                    setStatus("Using Hero Power.")
+                    tapAt(e.rect)
+                }
+                else -> select("Hero Power selected. Double tap again to use it, or choose a target.")
+            }
+            K.DROP -> {
+                if (sel == null) setStatus("Select a card first.")
+                else move(sel, e.rect, "${e.label.replace("Summon", "Summoning ${shortName(sel)}")}.")
+            }
+        }
+    }
+
+    /** Drags a finger from one spot to another, like playing a card or attacking. */
+    private fun dragFrom(from: Rect, to: Rect) {
+        lastTapAt = System.currentTimeMillis()
+        tapping = true
+        itemsLayer?.let { runCatching { wm.removeViewImmediate(it) } }
+        openPassthroughSpot(wm.currentWindowMetrics.bounds)
+        val path = Path().apply {
+            moveTo(from.exactCenterX(), from.exactCenterY())
+            lineTo(to.exactCenterX(), to.exactCenterY())
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 450))
+            .build()
+        handler.postDelayed({
+            val sent = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(g: GestureDescription?) { beep(ok = true); afterTap() }
+                override fun onCancelled(g: GestureDescription?) {
+                    beep(ok = false); setStatus("The move was cancelled by Android."); afterTap()
+                }
+            }, null)
+            if (!sent) { beep(ok = false); setStatus("Android didn't allow the move."); afterTap() }
+        }, 50)
+    }
+
+    /**
+     * Saves a screenshot and what the app read into Downloads, GameBypass folder,
+     * so you can send them to Claude to tune the Hearthstone layout.
+     */
+    private fun saveScreenForHelp() {
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                    val buffer = result.hardwareBuffer
+                    val hw = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
+                    val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                    hw?.recycle(); buffer.close()
+                    if (bmp == null) { setStatus("Couldn't save the screen."); return }
+                    val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+                    try {
+                        writeDownload("gamebypass-$stamp.png", "image/png") { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                        val b = wm.currentWindowMetrics.bounds
+                        val report = buildString {
+                            appendLine("screen ${b.width()}x${b.height()} screenshot ${bmp.width}x${bmp.height}")
+                            latestItems.forEach { appendLine("${it.text}\t${it.rect.left},${it.rect.top},${it.rect.right},${it.rect.bottom}") }
+                            appendLine("--- entries")
+                            hsEntries.forEach { appendLine("${it.kind}\t${it.label}\t${it.rect.left},${it.rect.top},${it.rect.right},${it.rect.bottom}") }
+                        }
+                        writeDownload("gamebypass-$stamp.txt", "text/plain") { it.write(report.toByteArray()) }
+                        setStatus("Saved to Downloads, GameBypass folder.")
+                    } catch (e: Exception) {
+                        setStatus("Couldn't save the screen.")
+                        Log.e(tag, "Save failed", e)
+                    } finally {
+                        bmp.recycle()
+                    }
+                }
+                override fun onFailure(errorCode: Int) { setStatus("Couldn't take the screenshot. Try again in a second.") }
+            })
+        } catch (e: Exception) {
+            setStatus("Couldn't save the screen.")
+        }
+    }
+
+    private fun writeDownload(name: String, mime: String, write: (java.io.OutputStream) -> Unit) {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/GameBypass")
+        }
+        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: throw IllegalStateException("No download folder")
+        contentResolver.openOutputStream(uri)!!.use(write)
     }
 
     private fun similarity(a: Set<String>, b: Set<String>): Double {
