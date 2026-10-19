@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Game Bypass TB Helper</string>
+    <string name="service_name">Game Bypass Mode</string>
+    <string name="service_description">Works alongside TalkBack. When you open a game or app TalkBack cannot read, Game Bypass Mode turns on by itself, reads the screen with OCR, and gives you items you can swipe to, explore by touch, and double tap. It turns off when you leave the game.</string>
+</resources>
