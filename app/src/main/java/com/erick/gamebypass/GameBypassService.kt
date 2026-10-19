@@ -103,6 +103,8 @@ class GameBypassService : AccessibilityService() {
     private var hsInMatch = false
     private var hsEnemyTurn = false
     private var focusedKey: String? = null
+    // Set when you press Rescan, so the next reading always says how many buttons it found.
+    private var rescanRequested = false
 
     // Our own voice for direct touch. TalkBack stops talking whenever you touch
     // the screen; this voice doesn't, so you hear instructions while you play.
@@ -350,6 +352,7 @@ class GameBypassService : AccessibilityService() {
         bar.addView(invisibleButton("Rescan") {
             currentTexts = emptySet()
             emptyScans = 0
+            rescanRequested = true
             setStatus("Rescanning.")
             scan()
         })
@@ -552,7 +555,11 @@ class GameBypassService : AccessibilityService() {
         val texts = items.map { it.text.lowercase() }.toSet()
 
         latestItems = items
+        val announceCount = rescanRequested
+        rescanRequested = false
+        fun found(n: Int) = if (n == 0) "Found no buttons." else "Found $n button${if (n == 1) "" else "s"}."
         if (items.isEmpty()) {
+            if (announceCount) setStatus(found(0))
             emptyScans++
             // Hearthstone never needs automatic direct touch.
             if (emptyScans == 3 && !directTouch && profile != "hearthstone") {
@@ -562,7 +569,10 @@ class GameBypassService : AccessibilityService() {
         }
         emptyScans = 0
 
-        if (profile == "hearthstone" && !directTouch && handleHearthstone(items)) return
+        if (profile == "hearthstone" && !directTouch && handleHearthstone(items)) {
+            if (announceCount) setStatus(found(hsEntries.count { it.kind != K.HEADING }))
+            return
+        }
 
         if (directTouch) {
             // A menu with words showed up again: go back to reading mode, but only
@@ -572,15 +582,22 @@ class GameBypassService : AccessibilityService() {
             } else {
                 speakNewGameText(items)
             }
+            if (announceCount) setStatus(found(items.size))
             return
         }
 
-        if (similarity(texts, currentTexts) >= 0.7) return // same screen, keep TalkBack's place
+        if (!announceCount && similarity(texts, currentTexts) >= 0.7) return // same screen, keep TalkBack's place
         val firstTime = currentTexts.isEmpty()
         currentTexts = texts
         buildItems(items)
-        val count = "${items.size} item${if (items.size == 1) "" else "s"}"
-        setStatus(if (firstTime) "Game Bypass Mode. $count." else "Screen changed. $count.")
+        val count = "${items.size} button${if (items.size == 1) "" else "s"}"
+        setStatus(
+            when {
+                announceCount -> found(items.size)
+                firstTime -> "Game Bypass Mode. $count."
+                else -> "Screen changed. $count."
+            }
+        )
     }
 
     /**
