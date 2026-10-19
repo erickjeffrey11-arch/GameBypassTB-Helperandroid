@@ -108,6 +108,16 @@ class GameBypassService : AccessibilityService() {
     // True while the keyboard is on screen.
     private var imeShowing = false
 
+    // Smart labels (on-phone AI descriptions of weird or unlabeled buttons).
+    private var lastShot: Bitmap? = null
+    private val labeler by lazy { SmartLabeler(this, mainExecutor) }
+    private val labelPrefs by lazy { getSharedPreferences("smart_labels", MODE_PRIVATE) }
+    private val itemViews = mutableListOf<Pair<Item, View>>()
+    private val labelQueue = ArrayDeque<Item>()
+    private var describing = false
+    private var labelerWarned = false
+    private var focusedItem: Item? = null
+
     // Our own voice for direct touch. TalkBack stops talking whenever you touch
     // the screen; this voice doesn't, so you hear instructions while you play.
     private var tts: TextToSpeech? = null
@@ -171,6 +181,7 @@ class GameBypassService : AccessibilityService() {
 
     override fun onDestroy() {
         tts?.shutdown()
+        runCatching { labeler.close() }
         tts = null
         turnOff(announce = false)
         removeControlBar()
@@ -356,6 +367,7 @@ class GameBypassService : AccessibilityService() {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         bar.addView(status)
+        bar.addView(invisibleButton("Describe") { describeFocused() })
         bar.addView(invisibleButton("Rescan") {
             currentTexts = emptySet()
             emptyScans = 0
@@ -494,19 +506,19 @@ class GameBypassService : AccessibilityService() {
                             recognizer.process(InputImage.fromBitmap(contrast, 0))
                                 .addOnSuccessListener { second ->
                                     scanning = false
-                                    bmp.recycle(); contrast.recycle()
+                                    keepShot(bmp); contrast.recycle()
                                     onTextFound(listOf(first, second), boxes)
                                 }
                                 .addOnFailureListener { e ->
                                     scanning = false
-                                    bmp.recycle(); contrast.recycle()
+                                    keepShot(bmp); contrast.recycle()
                                     Log.e(tag, "Second OCR pass failed", e)
                                     onTextFound(listOf(first), boxes)
                                 }
                         }
                         .addOnFailureListener { e ->
                             scanning = false
-                            bmp.recycle(); contrast.recycle()
+                            keepShot(bmp); contrast.recycle()
                             Log.e(tag, "OCR failed", e)
                         }
                 }
@@ -603,6 +615,7 @@ class GameBypassService : AccessibilityService() {
         val firstTime = currentTexts.isEmpty()
         currentTexts = texts
         buildItems(items)
+        autoLabel(items)
         val count = "${items.size} button${if (items.size == 1) "" else "s"}"
         setStatus(
             when {
@@ -1151,6 +1164,125 @@ class GameBypassService : AccessibilityService() {
         }
     }
 
+    // ------------------------------------------------------ Smart labels
+
+    private fun keepShot(bmp: Bitmap) {
+        val old = lastShot
+        lastShot = bmp
+        if (old != null && old !== bmp) old.recycle()
+    }
+
+    private fun labelKey(item: Item) =
+        "${currentPackage}|${item.text.lowercase()}|${item.rect.centerX() / 60}|${item.rect.centerY() / 60}"
+
+    private fun labelFor(item: Item): String {
+        val saved = labelPrefs.getString(labelKey(item), null)
+        return if (saved != null) "${item.text}, $saved" else item.text
+    }
+
+    /** Buttons that need a picture description: just numbers, or a few odd letters. */
+    private fun isWeird(text: String): Boolean {
+        val t = text.removeSuffix(", text box").trim()
+        if (t.matches(Regex("^[\\d\\s,./%+x:-]+$"))) return true
+        val letters = t.filter { it.isLetter() }
+        if (letters.length in 1..3 && !t.contains(' ')) return true
+        return letters.length >= 4 && letters.none { it.lowercaseChar() in "aeiouy" }
+    }
+
+    /** Queues up to 4 weird buttons on this screen for the on-phone AI. */
+    private fun autoLabel(items: List<Item>) {
+        labelQueue.clear()
+        items.filter { isWeird(it.text) && !labelPrefs.contains(labelKey(it)) }
+            .take(4)
+            .forEach { labelQueue.addLast(it) }
+        runLabelQueue()
+    }
+
+    private fun runLabelQueue() {
+        if (describing || labelQueue.isEmpty()) return
+        labeler.prepare { ok ->
+            if (!ok) {
+                labelQueue.clear()
+                if (!labelerWarned) {
+                    labelerWarned = true
+                    speakGame("Smart labels are off: ${labeler.problem ?: "the phone's offline AI isn't available"}.")
+                }
+                return@prepare
+            }
+            val item = labelQueue.removeFirstOrNull() ?: return@prepare
+            val crop = cropAround(item.rect, wide = true) ?: return@prepare
+            describing = true
+            labeler.describe(crop) { text, problem ->
+                describing = false
+                crop.recycle()
+                if (text != null) {
+                    val label = "picture: " + shorten(text)
+                    labelPrefs.edit().putString(labelKey(item), label).apply()
+                    itemViews.firstOrNull { it.first == item }?.second?.contentDescription = "${item.text}, $label"
+                } else {
+                    Log.w(tag, "Describe failed: $problem")
+                }
+                runLabelQueue()
+            }
+        }
+    }
+
+    /** Cuts out the area around a button from the last screenshot (with the picture next to it). */
+    private fun cropAround(screenRect: Rect, wide: Boolean): Bitmap? {
+        val shot = lastShot ?: return null
+        if (shot.isRecycled) return null
+        val r = Rect(
+            (screenRect.left / scaleX).toInt(), (screenRect.top / scaleY).toInt(),
+            (screenRect.right / scaleX).toInt(), (screenRect.bottom / scaleY).toInt()
+        )
+        if (wide) {
+            val padX = max(r.width(), r.height() * 2)
+            val padY = r.height()
+            r.inset(-padX, -padY)
+        }
+        if (!r.intersect(0, 0, shot.width, shot.height) || r.width() < 8 || r.height() < 8) return null
+        return Bitmap.createBitmap(shot, r.left, r.top, r.width(), r.height())
+    }
+
+    private fun shorten(description: String): String {
+        val first = description.trim().split(Regex("(?<=[.!?])\\s")).first().trim().removeSuffix(".")
+        val short = if (first.length > 90) first.take(90).substringBeforeLast(' ') else first
+        return short.replaceFirstChar { it.lowercase() }
+    }
+
+    /** The Describe button: describes the button you were on, or the whole screen. */
+    private fun describeFocused() {
+        val item = focusedItem
+        val picture = if (item != null) cropAround(item.rect, wide = true) else lastShot?.let {
+            if (it.isRecycled) null else it.copy(Bitmap.Config.ARGB_8888, false)
+        }
+        if (picture == null) {
+            setStatus("Nothing to describe yet. Try Rescan first.")
+            return
+        }
+        setStatus(if (item != null) "Describing ${item.text}." else "Describing the screen.")
+        labeler.prepare { ok ->
+            if (!ok) {
+                picture.recycle()
+                setStatus("Can't describe: ${labeler.problem ?: "the phone's offline AI isn't available"}.")
+                return@prepare
+            }
+            labeler.describe(picture) { text, problem ->
+                picture.recycle()
+                if (text == null) {
+                    setStatus("Couldn't describe it. ${problem ?: ""}")
+                    return@describe
+                }
+                setStatus(text)
+                if (item != null) {
+                    val label = "picture: " + shorten(text)
+                    labelPrefs.edit().putString(labelKey(item), label).apply()
+                    itemViews.firstOrNull { it.first == item }?.second?.contentDescription = "${item.text}, $label"
+                }
+            }
+        }
+    }
+
     private fun similarity(a: Set<String>, b: Set<String>): Double {
         if (a.isEmpty() || b.isEmpty()) return 0.0
         return a.intersect(b).size.toDouble() / max(a.size, b.size)
@@ -1196,12 +1328,13 @@ class GameBypassService : AccessibilityService() {
     private fun buildItems(items: List<Item>) {
         val layer = itemsLayer ?: return
         layer.removeAllViews()
+        itemViews.clear()
         focusedRect = null
         val pad = (6 * resources.displayMetrics.density).toInt()
         for (item in items) {
             val r = item.rect
             val view = View(this).apply {
-                contentDescription = item.text
+                contentDescription = labelFor(item)
                 isFocusable = true
                 isClickable = true
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
@@ -1219,6 +1352,7 @@ class GameBypassService : AccessibilityService() {
                             AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS -> {
                                 focusedRect = r
                                 focusedView = host
+                                focusedItem = item
                             }
                             // Way 2: TalkBack's double tap arrives as a "click" action. Tap the game.
                             AccessibilityNodeInfo.ACTION_CLICK -> {
@@ -1235,6 +1369,7 @@ class GameBypassService : AccessibilityService() {
                 topMargin = r.top - pad - itemsOffset[1]
             }
             layer.addView(view, lp)
+            itemViews += item to view
         }
     }
 
