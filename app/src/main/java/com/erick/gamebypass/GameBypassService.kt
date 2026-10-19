@@ -76,6 +76,9 @@ class GameBypassService : AccessibilityService() {
     private var checkPending = false
     private var focusedRect: Rect? = null
     private var lastTapAt = 0L
+    private var scaleX = 1f
+    private var scaleY = 1f
+    private var focusedView: View? = null
 
     // Direct touch: words already spoken, and when, so we don't repeat them.
     private val spokenAt = mutableMapOf<String, Long>()
@@ -413,6 +416,10 @@ class GameBypassService : AccessibilityService() {
                     hw?.recycle()
                     buffer.close()
                     if (bmp == null) { scanning = false; return }
+                    // Make sure picture positions match screen positions exactly.
+                    val screen = wm.currentWindowMetrics.bounds
+                    scaleX = screen.width().toFloat() / bmp.width
+                    scaleY = screen.height().toFloat() / bmp.height
                     recognizer.process(InputImage.fromBitmap(bmp, 0))
                         .addOnSuccessListener { text ->
                             scanning = false
@@ -451,7 +458,10 @@ class GameBypassService : AccessibilityService() {
                 val words = line.text.trim()
                 if (words.isEmpty()) return@mapNotNull null
                 if (bar != null && Rect.intersects(bar, box) && box.centerY() > bar.top) return@mapNotNull null
-                Item(words, Rect(box))
+                Item(words, Rect(
+                    (box.left * scaleX).toInt(), (box.top * scaleY).toInt(),
+                    (box.right * scaleX).toInt(), (box.bottom * scaleY).toInt()
+                ))
             }
         val items = orderForReading(mergeNearbyLines(lines))
         val texts = items.map { it.text.lowercase() }.toSet()
@@ -571,7 +581,10 @@ class GameBypassService : AccessibilityService() {
                     override fun performAccessibilityAction(host: View, action: Int, args: android.os.Bundle?): Boolean {
                         when (action) {
                             // Remember which item TalkBack is on.
-                            AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS -> focusedRect = r
+                            AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS -> {
+                                focusedRect = r
+                                focusedView = host
+                            }
                             // Way 2: TalkBack's double tap arrives as a "click" action. Tap the game.
                             AccessibilityNodeInfo.ACTION_CLICK -> {
                                 tapAt(r)
@@ -601,13 +614,16 @@ class GameBypassService : AccessibilityService() {
         if (attempt == 1 && now - lastTapAt < 400) return
         lastTapAt = now
         tapping = true
-        // Let the tap fall through our invisible layer to the game.
-        setItemsTouchable(false)
+        // Take our invisible layer off the screen right now (not "soon"), so the
+        // tap reaches the game and not our own pretend button.
+        if (attempt == 1) itemsLayer?.let { runCatching { wm.removeViewImmediate(it) } }
         val path = Path().apply { moveTo(r.exactCenterX(), r.exactCenterY()) }
+        // Hold the finger down a little longer; some games ignore very quick taps.
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 120))
             .build()
-        handler.post {
+        // Tiny wait (a twentieth of a second) for Android to notice the layer is gone.
+        handler.postDelayed({
             val sent = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
                 override fun onCompleted(g: GestureDescription?) {
                     Log.i(tag, "Tap done at ${r.centerX()},${r.centerY()}")
@@ -628,14 +644,29 @@ class GameBypassService : AccessibilityService() {
                 setStatus("Android didn't allow the tap.")
                 afterTap()
             }
-        }
+        }, 50)
     }
 
     private fun afterTap() {
         handler.postDelayed({
             tapping = false
             if (!bypassOn) return@postDelayed
-            if (!directTouch) setItemsTouchable(true)
+            // Put the same invisible layer back, with the same items.
+            val layer = itemsLayer
+            val params = itemsParams
+            if (layer != null && params != null && layer.parent == null) {
+                if (directTouch) params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                runCatching { wm.addView(layer, params) }
+                // Keep the bottom strip on top so you can still find it by touch.
+                controlBar?.let { bar ->
+                    val lp = bar.layoutParams
+                    runCatching { wm.removeViewImmediate(bar); wm.addView(bar, lp) }
+                }
+                // Put TalkBack back on the item you were on.
+                focusedView?.let { v ->
+                    v.post { v.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null) }
+                }
+            }
             // Look again once the game has reacted.
             handler.postDelayed({ scan() }, 800)
         }, 150)
