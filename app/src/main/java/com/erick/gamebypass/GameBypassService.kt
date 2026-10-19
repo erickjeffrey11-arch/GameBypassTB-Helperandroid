@@ -73,6 +73,9 @@ class GameBypassService : AccessibilityService() {
     private var currentTexts: Set<String> = emptySet()
     private var checkPending = false
 
+    // Direct touch: words already spoken, and when, so we don't repeat them.
+    private val spokenAt = mutableMapOf<String, Long>()
+
     // The two invisible windows we put on top of the game.
     private var itemsLayer: FrameLayout? = null
     private var itemsParams: WindowManager.LayoutParams? = null
@@ -86,7 +89,8 @@ class GameBypassService : AccessibilityService() {
         override fun run() {
             if (!bypassOn) return
             scan()
-            handler.postDelayed(this, 3000)
+            // Look more often in direct touch, so game instructions are spoken quickly.
+            handler.postDelayed(this, if (directTouch) 1500 else 3000)
         }
     }
 
@@ -458,7 +462,11 @@ class GameBypassService : AccessibilityService() {
         if (directTouch) {
             // A menu with words showed up again: go back to reading mode, but only
             // if direct touch was switched on automatically.
-            if (directTouchAuto && items.size >= 3) setDirectTouch(false, auto = false, speak = true)
+            if (directTouchAuto && items.size >= 3) {
+                setDirectTouch(false, auto = false, speak = true)
+            } else {
+                speakNewGameText(items)
+            }
             return
         }
 
@@ -468,6 +476,30 @@ class GameBypassService : AccessibilityService() {
         buildItems(items)
         val count = "${items.size} item${if (items.size == 1) "" else "s"}"
         setStatus(if (firstTime) "Game Bypass Mode. $count." else "Screen changed. $count.")
+    }
+
+    /**
+     * In direct touch, say any new words the game shows, like "Swipe right to dodge",
+     * so you can just do it. Numbers are ignored when checking for "new", so a
+     * score going from 120 to 130 doesn't keep talking.
+     */
+    private fun speakNewGameText(items: List<Item>) {
+        val now = System.currentTimeMillis()
+        spokenAt.entries.removeAll { now - it.value > 15000 }
+        val fresh = items.filter { item ->
+            val key = item.text.lowercase().replace(Regex("[0-9]+"), "#").trim()
+            val hasLetters = key.any { it.isLetter() }
+            if (!hasLetters || key.length < 2 || spokenAt.containsKey(key)) {
+                if (hasLetters) spokenAt[key] = now // still on screen: keep it quiet
+                false
+            } else {
+                spokenAt[key] = now
+                true
+            }
+        }
+        if (fresh.isNotEmpty()) {
+            setStatus(fresh.take(3).joinToString(". ") { it.text })
+        }
     }
 
     private fun similarity(a: Set<String>, b: Set<String>): Double {

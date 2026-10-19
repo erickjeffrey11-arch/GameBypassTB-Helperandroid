@@ -42,6 +42,7 @@ class MainActivity : Activity() {
                 At the bottom of the screen there are three buttons: Rescan, Direct touch, and Pause.
                 Rescan reads the screen again.
                 Direct touch sends your taps straight to the game. Turn it off with the same button.
+                While direct touch is on, it keeps watching the screen and says any new words the game shows, like Swipe right to dodge, so you can just do it.
                 Pause turns Game Bypass Mode off for this game until you leave it.
 
                 If it finds no text three times in a row, it switches to direct touch by itself, and switches back when a menu with text shows up.
