@@ -59,7 +59,7 @@ import kotlin.math.min
  */
 class GameBypassService : AccessibilityService() {
 
-    private data class Item(val text: String, val rect: Rect)
+    private data class Item(val text: String, val rect: Rect, val node: AccessibilityNodeInfo? = null)
 
     private val tag = "GameBypass"
     private val handler = Handler(Looper.getMainLooper())
@@ -105,6 +105,8 @@ class GameBypassService : AccessibilityService() {
     private var focusedKey: String? = null
     // Set when you press Rescan, so the next reading always says how many buttons it found.
     private var rescanRequested = false
+    // True while the keyboard is on screen.
+    private var imeShowing = false
 
     // Our own voice for direct touch. TalkBack stops talking whenever you touch
     // the screen; this voice doesn't, so you hear instructions while you play.
@@ -198,6 +200,11 @@ class GameBypassService : AccessibilityService() {
     }
 
     private fun checkForeground() {
+        val ime = windows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        if (ime != imeShowing) {
+            imeShowing = ime
+            if (bypassOn) onKeyboardChanged(ime)
+        }
         val root = frontAppRoot() ?: return
         val pkg = root.packageName?.toString() ?: return
         if (pkg == packageName) return
@@ -462,7 +469,7 @@ class GameBypassService : AccessibilityService() {
     // ------------------------------------------------------- reading
 
     private fun scan() {
-        if (!bypassOn || scanning || tapping) return
+        if (!bypassOn || scanning || tapping || imeShowing) return
         scanning = true
         try {
             takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
@@ -481,19 +488,20 @@ class GameBypassService : AccessibilityService() {
                     // picture. Fancy game lettering (gold, glowing, carved) often only
                     // becomes readable in the second one.
                     val contrast = highContrast(bmp)
+                    val boxes = runCatching { findEmptyBoxes(bmp) }.getOrDefault(emptyList())
                     recognizer.process(InputImage.fromBitmap(bmp, 0))
                         .addOnSuccessListener { first ->
                             recognizer.process(InputImage.fromBitmap(contrast, 0))
                                 .addOnSuccessListener { second ->
                                     scanning = false
                                     bmp.recycle(); contrast.recycle()
-                                    onTextFound(listOf(first, second))
+                                    onTextFound(listOf(first, second), boxes)
                                 }
                                 .addOnFailureListener { e ->
                                     scanning = false
                                     bmp.recycle(); contrast.recycle()
                                     Log.e(tag, "Second OCR pass failed", e)
-                                    onTextFound(listOf(first))
+                                    onTextFound(listOf(first), boxes)
                                 }
                         }
                         .addOnFailureListener { e ->
@@ -519,7 +527,7 @@ class GameBypassService : AccessibilityService() {
         }
     }
 
-    private fun onTextFound(results: List<Text>) {
+    private fun onTextFound(results: List<Text>, boxes: List<Rect> = emptyList()) {
         if (!bypassOn) return
         val bar = controlBarRect()
         val screenH = wm.currentWindowMetrics.bounds.height()
@@ -551,7 +559,12 @@ class GameBypassService : AccessibilityService() {
             if (!dup) kept.add(f)
         }
         val lines = kept.map { it.item }
-        val items = orderForReading(mergeNearbyLines(lines))
+        val baseItems = orderForReading(mergeNearbyLines(lines))
+            .map { if (looksLikeTextBox(it.text)) it.copy(text = "${it.text}, text box") else it }
+        // Text boxes: real Android ones, and empty boxes in the picture. Not during a Hearthstone match.
+        val inMatch = profile == "hearthstone" &&
+            HearthstoneBoard.isMatch(baseItems.map { HearthstoneBoard.Word(it.text, it.rect) })
+        val items = if (inMatch) baseItems else orderForReading(baseItems + textBoxItems(baseItems, boxes))
         val texts = items.map { it.text.lowercase() }.toSet()
 
         latestItems = items
@@ -962,6 +975,182 @@ class GameBypassService : AccessibilityService() {
         contentResolver.openOutputStream(uri)!!.use(write)
     }
 
+    // ------------------------------------------------------ text boxes
+
+    private val fieldWords = Regex(
+        "^(enter|type|search|e-?mail|password|user ?name|username|verification|security code|" +
+            "code|battle ?tag|account|phone|first name|last name|name)\\b|enter (the |your )?code|email address",
+        RegexOption.IGNORE_CASE
+    )
+
+    private fun looksLikeTextBox(text: String) =
+        text.length <= 40 && !text.contains("text box") && fieldWords.containsMatchIn(text.trim())
+
+    /** Double tap on an item. Real Android text boxes get focused directly; everything else is tapped. */
+    private fun activateItem(item: Item) {
+        val node = item.node
+        if (node != null) {
+            val now = System.currentTimeMillis()
+            if (now - lastTapAt < 400) return
+            lastTapAt = now
+            val ok = runCatching {
+                node.refresh()
+                node.performAction(AccessibilityNodeInfo.ACTION_CLICK) ||
+                    node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            }.getOrDefault(false)
+            if (!ok) tapAt(item.rect)
+            return
+        }
+        tapAt(item.rect)
+    }
+
+    /**
+     * Extra items for text boxes:
+     *  - real Android text boxes the game shows (like Blizzard's web login pages),
+     *  - empty rectangles in the picture, named after the closest words above or to the left.
+     */
+    private fun textBoxItems(items: List<Item>, boxes: List<Rect>): List<Item> {
+        val out = mutableListOf<Item>()
+        // Real Android text boxes.
+        frontAppRoot()?.let { root ->
+            val stack = ArrayDeque<AccessibilityNodeInfo>()
+            stack.add(root)
+            var visited = 0
+            while (stack.isNotEmpty() && visited < 400) {
+                val n = stack.removeLast()
+                visited++
+                if (n.isEditable && n.isVisibleToUser) {
+                    val r = Rect().also { n.getBoundsInScreen(it) }
+                    val label = n.hintText?.toString()?.takeIf { it.isNotBlank() }
+                        ?: n.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+                        ?: n.text?.toString()?.takeIf { it.isNotBlank() && !n.isPassword }
+                    out += Item(if (label != null) "Text box, $label" else "Text box", r, n)
+                }
+                for (i in 0 until n.childCount) n.getChild(i)?.let { stack.add(it) }
+            }
+        }
+        // Empty boxes from the picture.
+        val screen = wm.currentWindowMetrics.bounds
+        for (raw in boxes.take(6)) {
+            val b = Rect((raw.left * scaleX).toInt(), (raw.top * scaleY).toInt(), (raw.right * scaleX).toInt(), (raw.bottom * scaleY).toInt())
+            if (items.any { b.contains(it.rect.centerX(), it.rect.centerY()) }) continue // has words inside: a button, not a text box
+            if (out.any { overlapRatio(it.rect, b) > 0.5f }) continue
+            if (controlBarRect()?.let { Rect.intersects(it, b) } == true) continue
+            val above = items.filter {
+                it.rect.bottom <= b.top + b.height() / 3 && b.top - it.rect.bottom < b.height() * 1.5f &&
+                    min(it.rect.right, b.right) - max(it.rect.left, b.left) > 0
+            }.maxByOrNull { it.rect.bottom }
+            val left = items.filter {
+                it.rect.right <= b.left + 4 && b.left - it.rect.right < screen.width() * 0.3f &&
+                    kotlin.math.abs(it.rect.centerY() - b.centerY()) < b.height()
+            }.maxByOrNull { it.rect.right }
+            val label = (above ?: left)?.text?.removeSuffix(", text box")
+            out += Item(if (label != null) "Text box, $label" else "Text box", b)
+        }
+        return out
+    }
+
+    /**
+     * Looks for empty, flat-colored rectangles that are wider than they are tall,
+     * which is what text boxes usually look like. Works on a small copy of the picture.
+     */
+    private fun findEmptyBoxes(src: Bitmap): List<Rect> {
+        val sw = 240
+        val sh = (src.height * sw.toFloat() / src.width).toInt().coerceAtLeast(1)
+        val small = Bitmap.createScaledBitmap(src, sw, sh, true)
+        val px = IntArray(sw * sh)
+        small.getPixels(px, 0, sw, 0, 0, sw, sh)
+        small.recycle()
+        val g = IntArray(sw * sh) { i ->
+            val c = px[i]
+            (((c shr 16) and 255) * 3 + ((c shr 8) and 255) * 6 + (c and 255)) / 10
+        }
+        // Horizontal edges (a strong change from the row above to the row below).
+        data class Seg(val y: Int, val x0: Int, val x1: Int)
+        val segs = mutableListOf<Seg>()
+        val minLen = (sw * 0.15f).toInt()
+        for (y in 1 until sh - 1) {
+            var start = -1
+            var gap = 0
+            for (x in 0 until sw) {
+                val edge = kotlin.math.abs(g[(y + 1) * sw + x] - g[(y - 1) * sw + x]) > 40
+                if (edge) {
+                    if (start < 0) start = x
+                    gap = 0
+                } else if (start >= 0) {
+                    gap++
+                    if (gap > 2) {
+                        val end = x - gap
+                        if (end - start >= minLen) segs += Seg(y, start, end)
+                        start = -1; gap = 0
+                    }
+                }
+            }
+            if (start >= 0 && sw - 1 - start >= minLen) segs += Seg(y, start, sw - 1)
+        }
+        // Keep one line per thick edge.
+        val lines = mutableListOf<Seg>()
+        for (sg in segs) {
+            if (lines.none { kotlin.math.abs(it.y - sg.y) <= 2 && kotlin.math.abs(it.x0 - sg.x0) <= 3 && kotlin.math.abs(it.x1 - sg.x1) <= 3 }) lines += sg
+        }
+        val out = mutableListOf<Rect>()
+        val minH = (sh * 0.03f).toInt().coerceAtLeast(3)
+        val maxH = (sh * 0.12f).toInt()
+        for (top in lines) for (bot in lines) {
+            val hgt = bot.y - top.y
+            if (hgt < minH || hgt > maxH) continue
+            if (kotlin.math.abs(top.x0 - bot.x0) > 3 || kotlin.math.abs(top.x1 - bot.x1) > 3) continue
+            val x0 = max(top.x0, bot.x0)
+            val x1 = min(top.x1, bot.x1)
+            val wdt = x1 - x0
+            if (wdt < hgt * 2.5f || wdt > hgt * 14f) continue
+            // Inside must be flat (no words, no picture).
+            var sum = 0L; var sq = 0L; var n = 0
+            for (y in top.y + 2 until bot.y - 1) for (x in x0 + 2 until x1 - 1) {
+                val v = g[y * sw + x]; sum += v; sq += v.toLong() * v; n++
+            }
+            if (n < 20) continue
+            val mean = sum.toDouble() / n
+            val variance = sq.toDouble() / n - mean * mean
+            if (variance > 144) continue
+            val r = Rect(
+                (x0 * src.width / sw), (top.y * src.height / sh),
+                (x1 * src.width / sw), (bot.y * src.height / sh)
+            )
+            if (out.none { overlapRatio(it, r) > 0.5f }) out += r
+            if (out.size >= 6) return out
+        }
+        return out
+    }
+
+    /** The keyboard opened or closed. Get out of its way so you can type. */
+    private fun onKeyboardChanged(open: Boolean) {
+        val bar = controlBar
+        if (open) {
+            setItemsTouchable(false)
+            bar?.let { b ->
+                b.visibility = View.INVISIBLE
+                (b.layoutParams as? WindowManager.LayoutParams)?.let { lp ->
+                    lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                    runCatching { wm.updateViewLayout(b, lp) }
+                }
+            }
+            speakGame("Keyboard open.")
+        } else {
+            if (!directTouch) setItemsTouchable(true)
+            bar?.let { b ->
+                b.visibility = View.VISIBLE
+                (b.layoutParams as? WindowManager.LayoutParams)?.let { lp ->
+                    lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                    runCatching { wm.updateViewLayout(b, lp) }
+                }
+            }
+            speakGame("Keyboard closed.")
+            currentTexts = emptySet()
+            handler.postDelayed({ scan() }, 500)
+        }
+    }
+
     private fun similarity(a: Set<String>, b: Set<String>): Double {
         if (a.isEmpty() || b.isEmpty()) return 0.0
         return a.intersect(b).size.toDouble() / max(a.size, b.size)
@@ -1017,7 +1206,7 @@ class GameBypassService : AccessibilityService() {
                 isClickable = true
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
                 // Way 1: a normal click on the item.
-                setOnClickListener { tapAt(r) }
+                setOnClickListener { activateItem(item) }
                 accessibilityDelegate = object : View.AccessibilityDelegate() {
                     override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
                         super.onInitializeAccessibilityNodeInfo(host, info)
@@ -1033,7 +1222,7 @@ class GameBypassService : AccessibilityService() {
                             }
                             // Way 2: TalkBack's double tap arrives as a "click" action. Tap the game.
                             AccessibilityNodeInfo.ACTION_CLICK -> {
-                                tapAt(r)
+                                activateItem(item)
                                 return true
                             }
                         }
@@ -1147,7 +1336,7 @@ class GameBypassService : AccessibilityService() {
             val layer = itemsLayer
             val params = itemsParams
             if (layer != null && params != null && layer.parent == null) {
-                if (directTouch) params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                if (directTouch || imeShowing) params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 runCatching { wm.addView(layer, params) }
                 // Keep the bottom strip on top so you can still find it by touch.
                 controlBar?.let { bar ->
