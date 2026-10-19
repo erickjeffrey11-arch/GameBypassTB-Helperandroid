@@ -352,9 +352,18 @@ class GameBypassService : AccessibilityService() {
         setTextColor(Color.TRANSPARENT)
         setBackgroundColor(Color.TRANSPARENT)
         isAllCaps = false
+        // A thin line at the very bottom edge, so it doesn't cover the game.
+        minHeight = 0
+        minimumHeight = 0
+        minWidth = 0
+        minimumWidth = 0
+        setPadding(0, 0, 0, 0)
+        textSize = 1f
         setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        layoutParams = LinearLayout.LayoutParams(0, stripHeight(), 1f)
     }
+
+    private fun stripHeight() = (10 * resources.displayMetrics.density).toInt()
 
     private fun showControlBar() {
         if (controlBar != null) return
@@ -364,7 +373,9 @@ class GameBypassService : AccessibilityService() {
             setTextColor(Color.TRANSPARENT)
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             isFocusable = true
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            textSize = 1f
+            setPadding(0, 0, 0, 0)
+            layoutParams = LinearLayout.LayoutParams(0, stripHeight(), 1f)
         }
         bar.addView(status)
         bar.addView(invisibleButton("Describe") { describeFocused() })
@@ -1330,8 +1341,13 @@ class GameBypassService : AccessibilityService() {
         layer.removeAllViews()
         itemViews.clear()
         focusedRect = null
-        val pad = (6 * resources.displayMetrics.density).toInt()
-        for (item in items) {
+        val screen = wm.currentWindowMetrics.bounds
+        // Make each button's touch area bigger (toward its neighbors), then fill
+        // big empty parts of the screen, so sliding your finger anywhere says something.
+        val areas = growAreas(items.map { it.rect }, screen)
+        // Empty areas go in first, so real buttons sit on top of them.
+        val all = emptyAreas(areas, screen).map { it to it.rect } + items.zip(areas)
+        for ((item, area) in all) {
             val r = item.rect
             val view = View(this).apply {
                 contentDescription = labelFor(item)
@@ -1364,13 +1380,70 @@ class GameBypassService : AccessibilityService() {
                     }
                 }
             }
-            val lp = FrameLayout.LayoutParams(r.width() + pad * 2, r.height() + pad * 2).apply {
-                leftMargin = r.left - pad - itemsOffset[0]
-                topMargin = r.top - pad - itemsOffset[1]
+            val lp = FrameLayout.LayoutParams(area.width(), area.height()).apply {
+                leftMargin = area.left - itemsOffset[0]
+                topMargin = area.top - itemsOffset[1]
             }
             layer.addView(view, lp)
             itemViews += item to view
         }
+    }
+
+    /**
+     * Grows each button's touch area: at least fingertip size, then outward toward
+     * its neighbors (halfway to the next button), up to a limit.
+     */
+    private fun growAreas(rects: List<Rect>, screen: Rect): List<Rect> {
+        val dp = resources.displayMetrics.density
+        val minSize = (48 * dp).toInt()
+        val capX = (screen.width() * 0.10f).toInt()
+        val capY = (screen.height() * 0.08f).toInt()
+        return rects.mapIndexed { i, r0 ->
+            val r = Rect(r0)
+            if (r.width() < minSize) r.inset(-(minSize - r.width()) / 2, 0)
+            if (r.height() < minSize) r.inset(0, -(minSize - r.height()) / 2)
+            val others = rects.filterIndexed { j, _ -> j != i }
+            fun rowOverlap(o: Rect) = min(o.bottom, r.bottom) - max(o.top, r.top) > 0
+            fun colOverlap(o: Rect) = min(o.right, r.right) - max(o.left, r.left) > 0
+            val leftGap = others.filter { rowOverlap(it) && it.right <= r0.left }.minOfOrNull { r0.left - it.right } ?: Int.MAX_VALUE
+            val rightGap = others.filter { rowOverlap(it) && it.left >= r0.right }.minOfOrNull { it.left - r0.right } ?: Int.MAX_VALUE
+            val upGap = others.filter { colOverlap(it) && it.bottom <= r0.top }.minOfOrNull { r0.top - it.bottom } ?: Int.MAX_VALUE
+            val downGap = others.filter { colOverlap(it) && it.top >= r0.bottom }.minOfOrNull { it.top - r0.bottom } ?: Int.MAX_VALUE
+            Rect(
+                min(r.left, r0.left - min(leftGap / 2, capX)),
+                min(r.top, r0.top - min(upGap / 2, capY)),
+                max(r.right, r0.right + min(rightGap / 2, capX)),
+                max(r.bottom, r0.bottom + min(downGap / 2, capY))
+            ).apply { intersect(screen) }
+        }
+    }
+
+    /**
+     * Splits the screen into 9 parts (top left, top, top right, ... bottom right).
+     * Any part with no buttons gets an "Empty area" item, so it isn't silent.
+     * Double tap taps the game there; Describe tells you what that part looks like.
+     */
+    private fun emptyAreas(areas: List<Rect>, screen: Rect): List<Item> {
+        val names = listOf(
+            "top left", "top", "top right",
+            "left", "middle", "right",
+            "bottom left", "bottom", "bottom right"
+        )
+        val cw = screen.width() / 3
+        val ch = screen.height() / 3
+        val out = mutableListOf<Item>()
+        for (row in 0 until 3) for (col in 0 until 3) {
+            val cell = Rect(col * cw, row * ch, (col + 1) * cw, (row + 1) * ch)
+            val covered = areas.sumOf { a ->
+                val i = Rect()
+                if (i.setIntersect(a, cell)) i.width().toLong() * i.height() else 0L
+            }
+            // Mostly empty (less than a quarter covered by buttons).
+            if (covered * 4 < cell.width().toLong() * cell.height()) {
+                out += Item("Empty area, ${names[row * 3 + col]}", cell)
+            }
+        }
+        return out
     }
 
     /**

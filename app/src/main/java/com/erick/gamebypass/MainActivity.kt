@@ -46,13 +46,16 @@ class MainActivity : Activity() {
                 How it works:
                 Keep TalkBack on. When you open a game TalkBack can't read, you'll hear Game Bypass Mode on, and how many items it found. Swipe through them, or slide your finger around the screen. Double tap an item to press it in the game.
 
-                At the bottom of the screen there are three buttons: Rescan, Direct touch, and Pause.
+                Along the very bottom edge of the screen there's a thin strip of buttons: Describe, Rescan, Direct touch, and Pause. Swipe to reach them.
+                Describe tells you what the button you were last on looks like, using the phone's built-in AI.
                 Rescan reads the screen again.
                 Direct touch sends your taps straight to the game. Turn it off with the same button.
                 While direct touch is on, it keeps watching the screen and says any new words the game shows, like Swipe right to dodge, so you can just do it.
                 Pause turns Game Bypass Mode off for this game until you leave it.
 
                 If it finds no text three times in a row, it switches to direct touch by itself, and switches back when a menu with text shows up.
+
+                Sliding your finger anywhere on the screen always says something. Parts with no buttons say Empty area, plus where it is.
 
                 When you go home, it turns off and TalkBack works normally.
             """.trimIndent()
