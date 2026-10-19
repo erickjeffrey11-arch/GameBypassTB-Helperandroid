@@ -608,6 +608,48 @@ class GameBypassService : AccessibilityService() {
      * Short beep = the tap was sent to the game. Low buzz = Android refused it.
      * (The beeps are just for testing, so we know where it goes wrong.)
      */
+    /**
+     * The pass-through trick (same feature direct touch uses): touches inside this spot
+     * skip TalkBack and go straight to the game. Used for a split second during a double tap,
+     * because otherwise TalkBack catches our fake tap and treats it as exploring.
+     */
+    private fun openPassthroughSpot(r: Rect): Boolean = try {
+        val info = serviceInfo
+        info.flags = info.flags or AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE
+        serviceInfo = info
+        val spot = Rect(r).apply { inset(-40, -40) }
+        val region = Region(spot)
+        if (directTouch) {
+            val screen = wm.currentWindowMetrics.bounds
+            region.op(Region(screen), Region.Op.UNION)
+            controlBarRect()?.let { region.op(it, Region.Op.DIFFERENCE) }
+        }
+        setTouchExplorationPassthroughRegion(Display.DEFAULT_DISPLAY, region)
+        true
+    } catch (e: Exception) {
+        Log.e(tag, "Pass-through spot failed", e)
+        false
+    }
+
+    /** Puts pass-through back the way it was: whole screen in direct touch, nothing otherwise. */
+    private fun closePassthroughSpot() {
+        try {
+            if (directTouch) {
+                val screen = wm.currentWindowMetrics.bounds
+                val region = Region(screen)
+                controlBarRect()?.let { region.op(it, Region.Op.DIFFERENCE) }
+                setTouchExplorationPassthroughRegion(Display.DEFAULT_DISPLAY, region)
+            } else {
+                setTouchExplorationPassthroughRegion(Display.DEFAULT_DISPLAY, Region())
+                val info = serviceInfo
+                info.flags = info.flags and AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE.inv()
+                serviceInfo = info
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Closing pass-through spot failed", e)
+        }
+    }
+
     private fun tapAt(r: Rect, attempt: Int = 1) {
         val now = System.currentTimeMillis()
         // Both ways can fire for one double tap; only tap once.
@@ -616,7 +658,10 @@ class GameBypassService : AccessibilityService() {
         tapping = true
         // Take our invisible layer off the screen right now (not "soon"), so the
         // tap reaches the game and not our own pretend button.
-        if (attempt == 1) itemsLayer?.let { runCatching { wm.removeViewImmediate(it) } }
+        if (attempt == 1) {
+            itemsLayer?.let { runCatching { wm.removeViewImmediate(it) } }
+            openPassthroughSpot(r)
+        }
         val path = Path().apply { moveTo(r.exactCenterX(), r.exactCenterY()) }
         // Hold the finger down a little longer; some games ignore very quick taps.
         val gesture = GestureDescription.Builder()
@@ -649,6 +694,7 @@ class GameBypassService : AccessibilityService() {
 
     private fun afterTap() {
         handler.postDelayed({
+            closePassthroughSpot()
             tapping = false
             if (!bypassOn) return@postDelayed
             // Put the same invisible layer back, with the same items.
