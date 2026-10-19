@@ -84,6 +84,7 @@ class GameBypassService : AccessibilityService() {
     private var emptyScans = 0
     private var currentTexts: Set<String> = emptySet()
     private var checkPending = false
+    private var unreadableSince: Long? = null
     private var focusedRect: Rect? = null
     private var lastTapAt = 0L
     private var scaleX = 1f
@@ -223,24 +224,62 @@ class GameBypassService : AccessibilityService() {
         if (pkg != currentPackage) {
             currentPackage = pkg
             pausedPackage = null
+            unreadableSince = null
             // Went straight from one game to another: start fresh so the right profile loads.
             if (bypassOn) turnOff(announce = false)
             profile = if (pkg == hearthstonePackage) "hearthstone" else null
         }
 
-        // Hearthstone always uses Game Bypass Mode, even if it shows TalkBack a little text.
-        val unreadable = pkg !in ignoredPackages && (profile == "hearthstone" || isUnreadable(root))
-        Log.i(tag, "Front app $pkg unreadable=$unreadable bypass=$bypassOn")
+        val readable = countReadable(root)
+        val game = isGame(pkg)
+        // An app that shows TalkBack plenty of real buttons is accessible: remember it
+        // and stay out of it from now on. Games are never marked, because their login
+        // screens can be readable while the game itself isn't.
+        if (readable >= 5 && !game && profile == null && pkg !in appList("always") && pkg !in ignoredPackages) {
+            addToList("accessible", pkg)
+        }
+
+        val unreadable = when {
+            pkg in ignoredPackages || pkg in appList("never") -> false
+            profile == "hearthstone" || pkg in appList("always") -> true
+            pkg in appList("accessible") -> false
+            else -> readable <= 1
+        }
+        Log.i(tag, "Front app $pkg readable=$readable game=$game unreadable=$unreadable bypass=$bypassOn")
 
         if (unreadable && !bypassOn && pausedPackage != pkg) {
-            turnOn()
-        } else if (!unreadable && bypassOn) {
-            turnOff(announce = true)
+            val instant = profile == "hearthstone" || pkg in appList("always")
+            // Patience: the screen has to stay unreadable for a moment, so loading
+            // screens and splash logos don't turn it on.
+            val wait = if (game) 1500L else 3000L
+            val now = System.currentTimeMillis()
+            val since = unreadableSince ?: now.also { unreadableSince = it }
+            if (instant || now - since >= wait) {
+                turnOn()
+            } else {
+                handler.removeCallbacks(checkRunnable)
+                checkPending = true
+                handler.postDelayed(checkRunnable, wait - (now - since) + 100)
+            }
+        } else if (!unreadable) {
+            unreadableSince = null
+            if (bypassOn) turnOff(announce = true)
         }
     }
 
-    /** "Unreadable" means TalkBack would find at most one thing with words on it. */
-    private fun isUnreadable(root: AccessibilityNodeInfo): Boolean {
+    private fun isGame(pkg: String): Boolean = runCatching {
+        packageManager.getApplicationInfo(pkg, 0).category == android.content.pm.ApplicationInfo.CATEGORY_GAME
+    }.getOrDefault(false)
+
+    private val appPrefs by lazy { getSharedPreferences("apps", MODE_PRIVATE) }
+    private fun appList(name: String): Set<String> = appPrefs.getStringSet(name, emptySet()) ?: emptySet()
+    private fun addToList(name: String, pkg: String) {
+        val set = appList(name)
+        if (pkg !in set) appPrefs.edit().putStringSet(name, set + pkg).apply()
+    }
+
+    /** How many things with words TalkBack can find (stops counting at 6). */
+    private fun countReadable(root: AccessibilityNodeInfo): Int {
         var readable = 0
         var visited = 0
         val stack = ArrayDeque<AccessibilityNodeInfo>()
@@ -252,13 +291,16 @@ class GameBypassService : AccessibilityService() {
                 val hasWords = !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()
                 if (hasWords) {
                     readable++
-                    if (readable > 1) return false
+                    if (readable >= 6) return readable
                 }
             }
             for (i in 0 until node.childCount) node.getChild(i)?.let { stack.add(it) }
         }
-        return true
+        return readable
     }
+
+    /** "Unreadable" means TalkBack would find at most one thing with words on it. */
+    private fun isUnreadable(root: AccessibilityNodeInfo): Boolean = countReadable(root) <= 1
 
     // ---------------------------------------------------- on and off
 
@@ -394,6 +436,16 @@ class GameBypassService : AccessibilityService() {
             bar.addView(invisibleButton("End turn") { endTurn() })
             bar.addView(invisibleButton("Save screen for help") { saveScreenForHelp() })
         }
+        bar.addView(invisibleButton("Never use Game Bypass in this app") {
+            currentPackage?.let { pkg ->
+                addToList("never", pkg)
+                val always = appList("always")
+                if (pkg in always) appPrefs.edit().putStringSet("always", always - pkg).apply()
+            }
+            turnOff(announce = false)
+            setStatus("Game Bypass won't turn on in this app anymore. You can change that in the Game Bypass app.")
+            handler.postDelayed(removeBarRunnable, 3000)
+        })
         bar.addView(invisibleButton("Pause Game Bypass for this game") {
             pausedPackage = currentPackage
             turnOff(announce = true)

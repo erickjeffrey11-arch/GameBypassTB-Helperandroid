@@ -4,6 +4,8 @@
     <!-- For Check for updates: talk to GitHub and install the new version. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- So it can tell which apps are games, and show app names in the Apps list. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <!-- Lets the app find out which app is the home screen. -->
     <queries>

@@ -17,6 +17,7 @@ class MainActivity : Activity() {
     private lateinit var updateStatus: TextView
     private lateinit var updateButton: Button
     private var latest: Updater.Release? = null
+    private lateinit var appsBox: LinearLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,13 +45,14 @@ class MainActivity : Activity() {
                 3. If Android says it's a restricted setting: go to Settings, Apps, Game Bypass TB Helper, then the More options menu at the top right, and choose Allow restricted settings. Then try step 2 again.
 
                 How it works:
-                Keep TalkBack on. When you open a game TalkBack can't read, you'll hear Game Bypass Mode on, and how many items it found. Swipe through them, or slide your finger around the screen. Double tap an item to press it in the game.
+                Keep TalkBack on. Game Bypass stays out of apps TalkBack can already read. When you open a game TalkBack can't read, you'll hear Game Bypass Mode on, and how many items it found. Swipe through them, or slide your finger around the screen. Double tap an item to press it in the game.
 
                 Along the very bottom edge of the screen there's a thin strip of buttons: Describe, Rescan, Direct touch, and Pause. Swipe to reach them.
                 Describe tells you what the button you were last on looks like, using the phone's built-in AI.
                 Rescan reads the screen again.
                 Direct touch sends your taps straight to the game. Turn it off with the same button.
                 While direct touch is on, it keeps watching the screen and says any new words the game shows, like Swipe right to dodge, so you can just do it.
+                Never use Game Bypass in this app turns it off for that app for good. You can undo that in the Apps section below.
                 Pause turns Game Bypass Mode off for this game until you leave it.
 
                 If it finds no text three times in a row, it switches to direct touch by itself, and switches back when a menu with text shows up.
@@ -67,6 +69,16 @@ class MainActivity : Activity() {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
         })
+
+        // ---- Apps where Game Bypass stays off
+        layout.addView(TextView(this).apply {
+            text = "Apps"
+            textSize = 20f
+            setPadding(0, pad * 2, 0, 0)
+            isAccessibilityHeading = true
+        })
+        appsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        layout.addView(appsBox)
 
         // ---- Check for updates
         layout.addView(TextView(this).apply {
@@ -94,6 +106,56 @@ class MainActivity : Activity() {
 
         setContentView(ScrollView(this).apply { addView(layout) })
         checkForUpdates()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        showApps()
+    }
+
+    /**
+     * Apps you told Game Bypass to never use, and apps it remembered as accessible.
+     * Each has a button to let Game Bypass work there again.
+     */
+    private fun showApps() {
+        val prefs = getSharedPreferences("apps", MODE_PRIVATE)
+        appsBox.removeAllViews()
+        fun label(pkg: String) = runCatching {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+        }.getOrDefault(pkg)
+        val never = prefs.getStringSet("never", emptySet()) ?: emptySet()
+        val accessible = prefs.getStringSet("accessible", emptySet()) ?: emptySet()
+        if (never.isEmpty() && accessible.isEmpty()) {
+            appsBox.addView(TextView(this).apply {
+                textSize = 17f
+                text = "No apps are blocked. Game Bypass stays out of apps you can already use, and remembers them here."
+            })
+            return
+        }
+        for (pkg in never.sortedBy { label(it).lowercase() }) {
+            appsBox.addView(Button(this).apply {
+                text = "${label(pkg)}: you turned Game Bypass off. Double tap to turn it back on."
+                isAllCaps = false
+                setOnClickListener {
+                    prefs.edit().putStringSet("never", never - pkg).apply()
+                    showApps()
+                }
+            })
+        }
+        for (pkg in accessible.sortedBy { label(it).lowercase() }) {
+            appsBox.addView(Button(this).apply {
+                text = "${label(pkg)}: already accessible, Game Bypass stays off. Double tap to always use Game Bypass here."
+                isAllCaps = false
+                setOnClickListener {
+                    val always = prefs.getStringSet("always", emptySet()) ?: emptySet()
+                    prefs.edit()
+                        .putStringSet("accessible", accessible - pkg)
+                        .putStringSet("always", always + pkg)
+                        .apply()
+                    showApps()
+                }
+            })
+        }
     }
 
     private fun currentBuild(): Int =
