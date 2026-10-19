@@ -6,6 +6,10 @@ import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.Paint
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.speech.tts.TextToSpeech
@@ -81,6 +85,11 @@ class GameBypassService : AccessibilityService() {
     private var scaleX = 1f
     private var scaleY = 1f
     private var focusedView: View? = null
+
+    // Game profiles. Only Hearthstone has one so far; every other game uses the normal behavior.
+    private val hearthstonePackage = "com.blizzard.wtcg.hearthstone"
+    private var profile: String? = null
+    private var latestItems: List<Item> = emptyList()
 
     // Our own voice for direct touch. TalkBack stops talking whenever you touch
     // the screen; this voice doesn't, so you hear instructions while you play.
@@ -181,9 +190,13 @@ class GameBypassService : AccessibilityService() {
         if (pkg != currentPackage) {
             currentPackage = pkg
             pausedPackage = null
+            // Went straight from one game to another: start fresh so the right profile loads.
+            if (bypassOn) turnOff(announce = false)
+            profile = if (pkg == hearthstonePackage) "hearthstone" else null
         }
 
-        val unreadable = pkg !in ignoredPackages && isUnreadable(root)
+        // Hearthstone always uses Game Bypass Mode, even if it shows TalkBack a little text.
+        val unreadable = pkg !in ignoredPackages && (profile == "hearthstone" || isUnreadable(root))
         Log.i(tag, "Front app $pkg unreadable=$unreadable bypass=$bypassOn")
 
         if (unreadable && !bypassOn && pausedPackage != pkg) {
@@ -223,9 +236,13 @@ class GameBypassService : AccessibilityService() {
         emptyScans = 0
         currentTexts = emptySet()
         handler.removeCallbacks(removeBarRunnable)
+        removeControlBar()
         showItemsLayer()
         showControlBar()
-        setStatus("Game Bypass Mode on. Reading the screen.")
+        setStatus(
+            if (profile == "hearthstone") "Game Bypass Mode on. Hearthstone profile."
+            else "Game Bypass Mode on. Reading the screen."
+        )
         handler.removeCallbacks(periodicScan)
         handler.postDelayed(periodicScan, 400)
     }
@@ -327,6 +344,9 @@ class GameBypassService : AccessibilityService() {
             setDirectTouch(!directTouch, auto = false, speak = true)
         }
         bar.addView(direct)
+        if (profile == "hearthstone") {
+            bar.addView(invisibleButton("End turn") { endTurn() })
+        }
         bar.addView(invisibleButton("Pause Game Bypass for this game") {
             pausedPackage = currentPackage
             turnOff(announce = true)
@@ -440,15 +460,28 @@ class GameBypassService : AccessibilityService() {
                     val screen = wm.currentWindowMetrics.bounds
                     scaleX = screen.width().toFloat() / bmp.width
                     scaleY = screen.height().toFloat() / bmp.height
+                    // Read twice: once normally, once as a high-contrast black and white
+                    // picture. Fancy game lettering (gold, glowing, carved) often only
+                    // becomes readable in the second one.
+                    val contrast = highContrast(bmp)
                     recognizer.process(InputImage.fromBitmap(bmp, 0))
-                        .addOnSuccessListener { text ->
-                            scanning = false
-                            bmp.recycle()
-                            onTextFound(text)
+                        .addOnSuccessListener { first ->
+                            recognizer.process(InputImage.fromBitmap(contrast, 0))
+                                .addOnSuccessListener { second ->
+                                    scanning = false
+                                    bmp.recycle(); contrast.recycle()
+                                    onTextFound(listOf(first, second))
+                                }
+                                .addOnFailureListener { e ->
+                                    scanning = false
+                                    bmp.recycle(); contrast.recycle()
+                                    Log.e(tag, "Second OCR pass failed", e)
+                                    onTextFound(listOf(first))
+                                }
                         }
                         .addOnFailureListener { e ->
                             scanning = false
-                            bmp.recycle()
+                            bmp.recycle(); contrast.recycle()
                             Log.e(tag, "OCR failed", e)
                         }
                 }
@@ -469,31 +502,48 @@ class GameBypassService : AccessibilityService() {
         }
     }
 
-    private fun onTextFound(result: Text) {
+    private fun onTextFound(results: List<Text>) {
         if (!bypassOn) return
         val bar = controlBarRect()
-        val lines = result.textBlocks.flatMap { it.lines }
+        val screenH = wm.currentWindowMetrics.bounds.height()
+        data class Found(val item: Item, val confidence: Float)
+        val found = results.flatMap { r -> r.textBlocks.flatMap { it.lines } }
             .mapNotNull { line ->
-                val box = line.boundingBox ?: return@mapNotNull null
+                val raw = line.boundingBox ?: return@mapNotNull null
+                val box = Rect(
+                    (raw.left * scaleX).toInt(), (raw.top * scaleY).toInt(),
+                    (raw.right * scaleX).toInt(), (raw.bottom * scaleY).toInt()
+                )
                 val words = cleanText(line.text) ?: return@mapNotNull null
                 // The reader's own "how sure am I" score. Low = probably game art, not words.
-                if (line.confidence in 0f..0.55f) return@mapNotNull null
+                // Big text is usually a real button, so it gets a gentler check.
+                val big = box.height() > screenH * 0.03f
+                val minConfidence = if (big) 0.3f else 0.55f
+                if (line.confidence in 0f..minConfidence) return@mapNotNull null
                 // Tilted text is almost always part of a picture.
                 if (kotlin.math.abs(line.angle) > 25f) return@mapNotNull null
                 // Tiny specks.
                 if (box.height() < 12) return@mapNotNull null
                 if (bar != null && Rect.intersects(bar, box) && box.centerY() > bar.top) return@mapNotNull null
-                Item(words, Rect(
-                    (box.left * scaleX).toInt(), (box.top * scaleY).toInt(),
-                    (box.right * scaleX).toInt(), (box.bottom * scaleY).toInt()
-                ))
+                Found(Item(words, box), line.confidence)
             }
+        // Both reading passes often find the same words. Keep the most confident one.
+        val kept = mutableListOf<Found>()
+        for (f in found.sortedByDescending { it.confidence }) {
+            val dup = kept.any { k -> overlapRatio(k.item.rect, f.item.rect) > 0.5f }
+            if (!dup) kept.add(f)
+        }
+        val lines = kept.map { it.item }
         val items = orderForReading(mergeNearbyLines(lines))
         val texts = items.map { it.text.lowercase() }.toSet()
 
+        latestItems = items
         if (items.isEmpty()) {
             emptyScans++
-            if (emptyScans == 3 && !directTouch) setDirectTouch(true, auto = true, speak = true)
+            // Hearthstone never needs automatic direct touch.
+            if (emptyScans == 3 && !directTouch && profile != "hearthstone") {
+                setDirectTouch(true, auto = true, speak = true)
+            }
             return
         }
         emptyScans = 0
@@ -576,6 +626,55 @@ class GameBypassService : AccessibilityService() {
         // Same character repeated 4+ times, like "IIIII" or "-----".
         if (Regex("([^0-9])\\1{3,}").containsMatchIn(t)) return null
         return t
+    }
+
+    /** How much two boxes overlap, compared to the smaller one (0 = not at all, 1 = fully). */
+    private fun overlapRatio(a: Rect, b: Rect): Float {
+        val i = Rect()
+        if (!i.setIntersect(a, b)) return 0f
+        val smaller = min(a.width() * a.height(), b.width() * b.height()).coerceAtLeast(1)
+        return (i.width() * i.height()).toFloat() / smaller
+    }
+
+    /** Black and white with strong contrast, which helps with fancy game lettering. */
+    private fun highContrast(src: Bitmap): Bitmap {
+        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        val c = 1.8f
+        val t = (-0.5f * c + 0.5f) * 255f
+        val matrix = ColorMatrix().apply { setSaturation(0f) }
+        matrix.postConcat(ColorMatrix(floatArrayOf(
+            c, 0f, 0f, 0f, t,
+            0f, c, 0f, 0f, t,
+            0f, 0f, c, 0f, t,
+            0f, 0f, 0f, 1f, 0f
+        )))
+        Canvas(out).drawBitmap(src, 0f, 0f, Paint().apply { colorFilter = ColorMatrixColorFilter(matrix) })
+        return out
+    }
+
+    /**
+     * Hearthstone's End turn button. Uses the words on the button when they can be read;
+     * otherwise taps where the button sits on Hearthstone's screen (right side, middle).
+     */
+    private fun endTurn() {
+        val enemy = latestItems.firstOrNull { it.text.lowercase().contains("enemy turn") }
+        if (enemy != null) {
+            setStatus("It's the enemy's turn.")
+            return
+        }
+        val button = latestItems.firstOrNull {
+            Regex("end\\s*turn|your\\s*turn").containsMatchIn(it.text.lowercase())
+        }
+        if (button != null) {
+            tapAt(button.rect)
+            return
+        }
+        val screen = wm.currentWindowMetrics.bounds
+        val w = max(screen.width(), screen.height())
+        val h = min(screen.width(), screen.height())
+        val x = (w * 0.885f).toInt()
+        val y = (h * 0.46f).toInt()
+        tapAt(Rect(x - 40, y - 20, x + 40, y + 20))
     }
 
     private fun similarity(a: Set<String>, b: Set<String>): Double {
