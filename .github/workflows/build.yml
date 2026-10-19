@@ -25,7 +25,7 @@ jobs:
       - name: Build the app
         run: |
           set -o pipefail
-          if ! gradle assembleDebug --no-daemon 2>&1 | tee build.log; then
+          if ! gradle assembleDebug --no-daemon -PbuildNumber=${{ github.run_number }} 2>&1 | tee build.log; then
             grep -v "> Task" build.log | grep -E -A4 "^e: |What went wrong|error:" | head -20 | while IFS= read -r line; do
               echo "::error::${line//%/%25}"
             done

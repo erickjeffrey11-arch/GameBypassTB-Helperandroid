@@ -11,8 +11,12 @@ android {
         applicationId = "com.erick.gamebypass"
         minSdk = 30
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2"
+        // GitHub passes its build number in, so build-7 on GitHub is version 7 here.
+        val buildNumber = (project.findProperty("buildNumber") as String?)?.toIntOrNull() ?: 1
+        versionCode = buildNumber
+        versionName = "build $buildNumber"
+        // Only the 64-bit phone code (your Pixel), which makes the APK much smaller.
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     signingConfigs {

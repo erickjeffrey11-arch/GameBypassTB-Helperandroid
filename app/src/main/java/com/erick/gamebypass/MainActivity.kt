@@ -2,6 +2,9 @@ package com.erick.gamebypass
 
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
+import android.view.View
+import java.io.File
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
@@ -11,6 +14,10 @@ import android.widget.TextView
 
 /** The simple screen you see when you open the app from the app list. */
 class MainActivity : Activity() {
+    private lateinit var updateStatus: TextView
+    private lateinit var updateButton: Button
+    private var latest: Updater.Release? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val pad = (16 * resources.displayMetrics.density).toInt()
@@ -58,6 +65,79 @@ class MainActivity : Activity() {
             }
         })
 
+        // ---- Check for updates
+        layout.addView(TextView(this).apply {
+            text = "Updates"
+            textSize = 20f
+            setPadding(0, pad * 2, 0, 0)
+            isAccessibilityHeading = true
+        })
+        updateStatus = TextView(this).apply {
+            textSize = 17f
+            setPadding(0, pad / 2, 0, pad / 2)
+            // TalkBack reads this out loud whenever it changes.
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            text = "You have build ${currentBuild()}."
+        }
+        layout.addView(updateStatus)
+        updateButton = Button(this).apply {
+            text = "Check for updates"
+            setOnClickListener {
+                val l = latest
+                if (l != null && l.build > currentBuild()) downloadAndInstall(l) else checkForUpdates()
+            }
+        }
+        layout.addView(updateButton)
+
         setContentView(ScrollView(this).apply { addView(layout) })
+        checkForUpdates()
+    }
+
+    private fun currentBuild(): Int =
+        packageManager.getPackageInfo(packageName, 0).longVersionCode.toInt()
+
+    private fun checkForUpdates() {
+        updateStatus.text = "Checking for updates."
+        Thread {
+            try {
+                val l = Updater.fetchLatest()
+                runOnUiThread {
+                    latest = l
+                    if (l.build > currentBuild()) {
+                        updateStatus.text = "Update available: build ${l.build}. You have build ${currentBuild()}. Double tap Install update."
+                        updateButton.text = "Install update"
+                    } else {
+                        updateStatus.text = "You're up to date. Build ${currentBuild()}."
+                        updateButton.text = "Check for updates"
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { updateStatus.text = "Couldn't check for updates. ${e.message}" }
+            }
+        }.start()
+    }
+
+    private fun downloadAndInstall(release: Updater.Release) {
+        if (!packageManager.canRequestPackageInstalls()) {
+            updateStatus.text = "First, allow this app to install updates. Turn on Allow from this source, then come back and double tap Install update again."
+            startActivity(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+            )
+            return
+        }
+        updateStatus.text = "Downloading build ${release.build}. This can take a minute."
+        updateButton.isEnabled = false
+        Thread {
+            try {
+                val file = File(cacheDir, "update.apk")
+                Updater.download(release.apkUrl, file)
+                runOnUiThread { updateStatus.text = "Downloaded. Android will ask you to confirm the update." }
+                Updater.install(this, file)
+            } catch (e: Exception) {
+                runOnUiThread { updateStatus.text = "Update failed. ${e.message}" }
+            } finally {
+                runOnUiThread { updateButton.isEnabled = true }
+            }
+        }.start()
     }
 }

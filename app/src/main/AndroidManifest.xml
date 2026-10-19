@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- For Check for updates: talk to GitHub and install the new version. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- Lets the app find out which app is the home screen. -->
     <queries>
         <intent>
@@ -22,6 +26,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".InstallResultReceiver"
+            android:exported="false" />
 
         <service
             android:name=".GameBypassService"

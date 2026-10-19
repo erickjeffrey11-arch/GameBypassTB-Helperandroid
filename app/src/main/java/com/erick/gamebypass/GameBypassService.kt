@@ -556,6 +556,12 @@ class GameBypassService : AccessibilityService() {
                 isClickable = true
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
                 setOnClickListener { tapAt(r) }
+                accessibilityDelegate = object : View.AccessibilityDelegate() {
+                    override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                        super.onInitializeAccessibilityNodeInfo(host, info)
+                        info.className = "android.widget.Button"
+                    }
+                }
             }
             val lp = FrameLayout.LayoutParams(r.width() + pad * 2, r.height() + pad * 2).apply {
                 leftMargin = r.left - pad - itemsOffset[0]
@@ -565,30 +571,61 @@ class GameBypassService : AccessibilityService() {
         }
     }
 
-    /** Taps the real game at the middle of where the words are. */
-    private fun tapAt(r: Rect) {
+    /**
+     * Taps the real game at the middle of where the words are.
+     *
+     * Version 0.2 bug: the tap was sent while TalkBack's double tap was still finishing,
+     * and while our invisible layer was still in the way, so the game never got it.
+     * Now we take the invisible layer off the screen completely, wait for TalkBack to
+     * finish, tap a little longer, retry once if Android cancels it, then put the layer back.
+     */
+    private fun tapAt(r: Rect, attempt: Int = 1) {
         tapping = true
-        // Our invisible layer would catch the tap itself, so let it fall through for a moment.
-        setItemsTouchable(false)
+        if (attempt == 1) {
+            itemsLayer?.let { runCatching { wm.removeView(it) } }
+            itemsLayer = null
+            itemsParams = null
+        }
         val path = Path().apply { moveTo(r.exactCenterX(), r.exactCenterY()) }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 100))
             .build()
         handler.postDelayed({
             val sent = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(g: GestureDescription?) = afterTap()
-                override fun onCancelled(g: GestureDescription?) = afterTap()
+                override fun onCompleted(g: GestureDescription?) {
+                    Log.i(tag, "Tap done at ${r.centerX()},${r.centerY()}")
+                    afterTap()
+                }
+                override fun onCancelled(g: GestureDescription?) {
+                    Log.w(tag, "Tap cancelled, attempt $attempt")
+                    if (attempt < 2) tapAt(r, attempt + 1) else {
+                        setStatus("The tap was cancelled by Android.")
+                        afterTap()
+                    }
+                }
             }, null)
-            if (!sent) afterTap()
-        }, 80)
+            if (!sent) {
+                setStatus("Android didn't allow the tap.")
+                afterTap()
+            }
+        }, 300)
     }
 
     private fun afterTap() {
         handler.postDelayed({
             tapping = false
-            if (!directTouch) setItemsTouchable(true)
+            if (!bypassOn) return@postDelayed
+            // Put the invisible layer back. The items get rebuilt by the next scan.
+            showItemsLayer()
+            if (directTouch) setItemsTouchable(false)
+            // Keep the bottom strip on top so you can still find it by touch.
+            controlBar?.let { bar ->
+                val lp = bar.layoutParams
+                runCatching { wm.removeView(bar); wm.addView(bar, lp) }
+            }
+            currentTexts = emptySet()
             // Look again once the game has reacted.
-            handler.postDelayed({ scan() }, 1000)
-        }, 150)
+            handler.postDelayed({ scan() }, 700)
+        }, 200)
     }
 }
