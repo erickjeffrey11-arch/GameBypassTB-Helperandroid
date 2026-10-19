@@ -24,7 +24,7 @@ class MainActivity : Activity() {
             text = "Game Bypass TB Helper"
             textSize = 24f
             isFocusable = true
-            accessibilityHeading = true
+            isAccessibilityHeading = true
         })
 
         layout.addView(TextView(this).apply {
