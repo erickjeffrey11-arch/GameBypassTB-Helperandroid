@@ -6,6 +6,8 @@ import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
@@ -72,6 +74,8 @@ class GameBypassService : AccessibilityService() {
     private var emptyScans = 0
     private var currentTexts: Set<String> = emptySet()
     private var checkPending = false
+    private var focusedRect: Rect? = null
+    private var lastTapAt = 0L
 
     // Direct touch: words already spoken, and when, so we don't repeat them.
     private val spokenAt = mutableMapOf<String, Long>()
@@ -547,6 +551,7 @@ class GameBypassService : AccessibilityService() {
     private fun buildItems(items: List<Item>) {
         val layer = itemsLayer ?: return
         layer.removeAllViews()
+        focusedRect = null
         val pad = (6 * resources.displayMetrics.density).toInt()
         for (item in items) {
             val r = item.rect
@@ -555,11 +560,25 @@ class GameBypassService : AccessibilityService() {
                 isFocusable = true
                 isClickable = true
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                // Way 1: a normal click on the item.
                 setOnClickListener { tapAt(r) }
                 accessibilityDelegate = object : View.AccessibilityDelegate() {
                     override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
                         super.onInitializeAccessibilityNodeInfo(host, info)
                         info.className = "android.widget.Button"
+                    }
+
+                    override fun performAccessibilityAction(host: View, action: Int, args: android.os.Bundle?): Boolean {
+                        when (action) {
+                            // Remember which item TalkBack is on.
+                            AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS -> focusedRect = r
+                            // Way 2: TalkBack's double tap arrives as a "click" action. Tap the game.
+                            AccessibilityNodeInfo.ACTION_CLICK -> {
+                                tapAt(r)
+                                return true
+                            }
+                        }
+                        return super.performAccessibilityAction(host, action, args)
                     }
                 }
             }
@@ -572,60 +591,59 @@ class GameBypassService : AccessibilityService() {
     }
 
     /**
-     * Taps the real game at the middle of where the words are.
-     *
-     * Version 0.2 bug: the tap was sent while TalkBack's double tap was still finishing,
-     * and while our invisible layer was still in the way, so the game never got it.
-     * Now we take the invisible layer off the screen completely, wait for TalkBack to
-     * finish, tap a little longer, retry once if Android cancels it, then put the layer back.
+     * Taps the real game at the middle of the item you're focused on, right away.
+     * Short beep = the tap was sent to the game. Low buzz = Android refused it.
+     * (The beeps are just for testing, so we know where it goes wrong.)
      */
     private fun tapAt(r: Rect, attempt: Int = 1) {
+        val now = System.currentTimeMillis()
+        // Both ways can fire for one double tap; only tap once.
+        if (attempt == 1 && now - lastTapAt < 400) return
+        lastTapAt = now
         tapping = true
-        if (attempt == 1) {
-            itemsLayer?.let { runCatching { wm.removeView(it) } }
-            itemsLayer = null
-            itemsParams = null
-        }
+        // Let the tap fall through our invisible layer to the game.
+        setItemsTouchable(false)
         val path = Path().apply { moveTo(r.exactCenterX(), r.exactCenterY()) }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 100))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
             .build()
-        handler.postDelayed({
+        handler.post {
             val sent = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
                 override fun onCompleted(g: GestureDescription?) {
                     Log.i(tag, "Tap done at ${r.centerX()},${r.centerY()}")
+                    beep(ok = true)
                     afterTap()
                 }
                 override fun onCancelled(g: GestureDescription?) {
                     Log.w(tag, "Tap cancelled, attempt $attempt")
-                    if (attempt < 2) tapAt(r, attempt + 1) else {
+                    if (attempt < 2) handler.postDelayed({ tapAt(r, attempt + 1) }, 50) else {
+                        beep(ok = false)
                         setStatus("The tap was cancelled by Android.")
                         afterTap()
                     }
                 }
             }, null)
             if (!sent) {
+                beep(ok = false)
                 setStatus("Android didn't allow the tap.")
                 afterTap()
             }
-        }, 300)
+        }
     }
 
     private fun afterTap() {
         handler.postDelayed({
             tapping = false
             if (!bypassOn) return@postDelayed
-            // Put the invisible layer back. The items get rebuilt by the next scan.
-            showItemsLayer()
-            if (directTouch) setItemsTouchable(false)
-            // Keep the bottom strip on top so you can still find it by touch.
-            controlBar?.let { bar ->
-                val lp = bar.layoutParams
-                runCatching { wm.removeView(bar); wm.addView(bar, lp) }
-            }
-            currentTexts = emptySet()
+            if (!directTouch) setItemsTouchable(true)
             // Look again once the game has reacted.
-            handler.postDelayed({ scan() }, 700)
-        }, 200)
+            handler.postDelayed({ scan() }, 800)
+        }, 150)
+    }
+
+    private val tones by lazy { runCatching { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 60) }.getOrNull() }
+
+    private fun beep(ok: Boolean) {
+        tones?.startTone(if (ok) ToneGenerator.TONE_PROP_ACK else ToneGenerator.TONE_PROP_NACK, 120)
     }
 }
