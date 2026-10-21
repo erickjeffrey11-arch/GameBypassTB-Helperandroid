@@ -1444,9 +1444,21 @@ class GameBypassService : AccessibilityService() {
         val old = itemViews.toMutableList()
         val fresh = mutableListOf<Pair<Item, View>>()
         val near = screen.width() * 0.12f
+        fun sameButton(o: Item, n: Item) =
+            normKey(o.text) == normKey(n.text) && distance(o.rect, n.rect) < near
+
+        // Keep your place: if the button TalkBack is on is gone from the new screen,
+        // reuse it for the new button in the same spot. TalkBack stays where it was,
+        // and just hears the new name.
+        val focusedOld = old.firstOrNull { it.second === focusedView }
+        val focusTarget = if (focusedOld != null && all.none { sameButton(focusedOld.first, it.first) }) {
+            val real = all.filter { it.first !in empties }.ifEmpty { all }
+            real.minByOrNull { distance(it.first.rect, focusedOld.first.rect) }?.first
+        } else null
+
         for ((item, area) in all) {
             val key = normKey(item.text)
-            val match = old
+            val match = (if (item === focusTarget) focusedOld else null) ?: old
                 .filter { normKey(it.first.text) == key }
                 .minByOrNull { distance(it.first.rect, item.rect) }
                 ?.takeIf { distance(it.first.rect, item.rect) < near }
@@ -1478,9 +1490,20 @@ class GameBypassService : AccessibilityService() {
             fresh += item to view
         }
         // Buttons that aren't on the screen anymore.
+        val lostFocus = old.firstOrNull { it.second === focusedView }
         old.forEach { layer.removeView(it.second) }
         itemViews.clear()
         itemViews.addAll(fresh)
+        // If the button you were on is gone anyway, go to the closest new one
+        // instead of letting TalkBack jump back to the top.
+        if (lostFocus != null) {
+            fresh.filter { it.first !in empties }.ifEmpty { fresh }
+                .minByOrNull { distance(it.first.rect, lostFocus.first.rect) }
+                ?.second?.let { v ->
+                    focusedView = v
+                    v.post { v.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null) }
+                }
+        }
     }
 
     private fun distance(a: Rect, b: Rect): Float {
