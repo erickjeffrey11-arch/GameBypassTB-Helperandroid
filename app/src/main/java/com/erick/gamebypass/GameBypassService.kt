@@ -371,6 +371,7 @@ class GameBypassService : AccessibilityService() {
     }
 
     private fun removeItemsLayer() {
+        itemViews.clear()
         itemsLayer?.let { runCatching { wm.removeView(it) } }
         itemsLayer = null
         itemsParams = null
@@ -512,6 +513,7 @@ class GameBypassService : AccessibilityService() {
         if (on) {
             // Let touches fall through our invisible items to the game.
             itemsLayer?.removeAllViews()
+            itemViews.clear()
             currentTexts = emptySet()
             setItemsTouchable(false)
         } else {
@@ -629,7 +631,9 @@ class GameBypassService : AccessibilityService() {
         val inMatch = profile == "hearthstone" &&
             HearthstoneBoard.isMatch(baseItems.map { HearthstoneBoard.Word(it.text, it.rect) })
         val items = if (inMatch) baseItems else orderForReading(baseItems + textBoxItems(baseItems, boxes))
-        val texts = items.map { it.text.lowercase() }.toSet()
+        // Numbers are ignored when comparing screens, so a coin count or score
+        // changing doesn't count as a new screen.
+        val texts = items.map { normKey(it.text) }.toSet()
 
         latestItems = items
         val announceCount = rescanRequested
@@ -663,7 +667,12 @@ class GameBypassService : AccessibilityService() {
             return
         }
 
-        if (!announceCount && similarity(texts, currentTexts) >= 0.7) return // same screen, keep TalkBack's place
+        if (!announceCount && similarity(texts, currentTexts) >= 0.7) {
+            // Same screen: quietly update names and positions, keeping the same
+            // buttons, so TalkBack doesn't lose your place.
+            buildItems(items)
+            return
+        }
         val firstTime = currentTexts.isEmpty()
         currentTexts = texts
         buildItems(items)
@@ -848,6 +857,7 @@ class GameBypassService : AccessibilityService() {
     private fun buildHearthstone(entries: List<HearthstoneBoard.Entry>) {
         val layer = itemsLayer ?: return
         layer.removeAllViews()
+        itemViews.clear()
         val pad = (4 * resources.displayMetrics.density).toInt()
         var refocus: View? = null
         for (e in entries) {
@@ -1377,57 +1387,106 @@ class GameBypassService : AccessibilityService() {
 
     // ---------------------------------------------- pretend buttons
 
+    /** Text with numbers swapped out, used to tell "the same button" apart from a new one. */
+    private fun normKey(text: String) = text.lowercase().replace(Regex("[0-9]+"), "#").trim()
+
+    /** One invisible button. It reads which item it stands for from its tag, so it can be reused. */
+    private fun makeItemView(): View = View(this).apply {
+        isFocusable = true
+        isClickable = true
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+        // Way 1: a normal click on the item.
+        setOnClickListener { (tag as? Item)?.let { activateItem(it) } }
+        accessibilityDelegate = object : View.AccessibilityDelegate() {
+            override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                info.className = "android.widget.Button"
+            }
+
+            override fun performAccessibilityAction(host: View, action: Int, args: android.os.Bundle?): Boolean {
+                val item = host.tag as? Item
+                when (action) {
+                    // Remember which item TalkBack is on.
+                    AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS -> {
+                        focusedRect = item?.rect
+                        focusedView = host
+                        focusedItem = item
+                    }
+                    // Way 2: TalkBack's double tap arrives as a "click" action. Tap the game.
+                    AccessibilityNodeInfo.ACTION_CLICK -> {
+                        item?.let { activateItem(it) }
+                        return true
+                    }
+                }
+                return super.performAccessibilityAction(host, action, args)
+            }
+        }
+    }
+
+    /**
+     * Puts the invisible buttons on the screen. Buttons that are still there from the
+     * last reading are kept and just updated, instead of being thrown away and made
+     * again. That way TalkBack stays on the button you were on.
+     */
     private fun buildItems(items: List<Item>) {
         val layer = itemsLayer ?: return
-        layer.removeAllViews()
-        itemViews.clear()
-        focusedRect = null
+        // Leftovers from something else (like a Hearthstone match): start clean.
+        if (layer.childCount != itemViews.size) {
+            layer.removeAllViews()
+            itemViews.clear()
+        }
         val screen = wm.currentWindowMetrics.bounds
         // Make each button's touch area bigger (toward its neighbors), then fill
         // big empty parts of the screen, so sliding your finger anywhere says something.
         val areas = growAreas(items.map { it.rect }, screen)
-        // Empty areas go in first, so real buttons sit on top of them.
-        val all = emptyAreas(areas, screen).map { it to it.rect } + items.zip(areas)
+        val empties = emptyAreas(areas, screen)
+        val all = empties.map { it to it.rect } + items.zip(areas)
+        val old = itemViews.toMutableList()
+        val fresh = mutableListOf<Pair<Item, View>>()
+        val near = screen.width() * 0.12f
         for ((item, area) in all) {
-            val r = item.rect
-            val view = View(this).apply {
-                contentDescription = labelFor(item)
-                isFocusable = true
-                isClickable = true
-                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
-                // Way 1: a normal click on the item.
-                setOnClickListener { activateItem(item) }
-                accessibilityDelegate = object : View.AccessibilityDelegate() {
-                    override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
-                        super.onInitializeAccessibilityNodeInfo(host, info)
-                        info.className = "android.widget.Button"
-                    }
-
-                    override fun performAccessibilityAction(host: View, action: Int, args: android.os.Bundle?): Boolean {
-                        when (action) {
-                            // Remember which item TalkBack is on.
-                            AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS -> {
-                                focusedRect = r
-                                focusedView = host
-                                focusedItem = item
-                            }
-                            // Way 2: TalkBack's double tap arrives as a "click" action. Tap the game.
-                            AccessibilityNodeInfo.ACTION_CLICK -> {
-                                activateItem(item)
-                                return true
-                            }
-                        }
-                        return super.performAccessibilityAction(host, action, args)
-                    }
+            val key = normKey(item.text)
+            val match = old
+                .filter { normKey(it.first.text) == key }
+                .minByOrNull { distance(it.first.rect, item.rect) }
+                ?.takeIf { distance(it.first.rect, item.rect) < near }
+            val view = if (match != null) {
+                old.remove(match)
+                match.second
+            } else {
+                makeItemView()
+            }
+            view.tag = item
+            val desc = labelFor(item)
+            if (view.contentDescription?.toString() != desc) view.contentDescription = desc
+            val left = area.left - itemsOffset[0]
+            val top = area.top - itemsOffset[1]
+            if (match == null) {
+                val lp = FrameLayout.LayoutParams(area.width(), area.height()).apply {
+                    leftMargin = left; topMargin = top
+                }
+                // Empty areas go underneath, so real buttons sit on top of them.
+                if (item in empties) layer.addView(view, 0, lp) else layer.addView(view, lp)
+            } else {
+                val lp = view.layoutParams as FrameLayout.LayoutParams
+                if (lp.leftMargin != left || lp.topMargin != top || lp.width != area.width() || lp.height != area.height()) {
+                    lp.leftMargin = left; lp.topMargin = top
+                    lp.width = area.width(); lp.height = area.height()
+                    view.layoutParams = lp
                 }
             }
-            val lp = FrameLayout.LayoutParams(area.width(), area.height()).apply {
-                leftMargin = area.left - itemsOffset[0]
-                topMargin = area.top - itemsOffset[1]
-            }
-            layer.addView(view, lp)
-            itemViews += item to view
+            fresh += item to view
         }
+        // Buttons that aren't on the screen anymore.
+        old.forEach { layer.removeView(it.second) }
+        itemViews.clear()
+        itemViews.addAll(fresh)
+    }
+
+    private fun distance(a: Rect, b: Rect): Float {
+        val dx = (a.centerX() - b.centerX()).toFloat()
+        val dy = (a.centerY() - b.centerY()).toFloat()
+        return kotlin.math.sqrt(dx * dx + dy * dy)
     }
 
     /**
