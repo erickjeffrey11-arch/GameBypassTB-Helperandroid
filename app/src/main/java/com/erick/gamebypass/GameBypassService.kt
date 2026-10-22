@@ -85,10 +85,6 @@ class GameBypassService : AccessibilityService() {
     private var currentTexts: Set<String> = emptySet()
     private var checkPending = false
     private var unreadableSince: Long? = null
-    // A new screen we've seen once, waiting for a second reading to confirm it.
-    private var pendingTexts: Set<String>? = null
-    // The last few readings of each button, for the majority vote on its name.
-    private val readings = HashMap<View, MutableList<String>>()
     private var focusedRect: Rect? = null
     private var lastTapAt = 0L
     private var scaleX = 1f
@@ -358,14 +354,9 @@ class GameBypassService : AccessibilityService() {
         if (itemsLayer != null) return
         val layer = FrameLayout(this)
         layer.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
-        // Stop just above the bottom strip, so the two never overlap and the strip
-        // never has to be taken off and put back (which made TalkBack lose its place).
-        val metrics = wm.currentWindowMetrics
-        val navBottom = metrics.windowInsets.getInsets(android.view.WindowInsets.Type.navigationBars()).bottom
-        val layerHeight = metrics.bounds.height() - navBottom - stripHeight()
         val params = overlayParams(
             WindowManager.LayoutParams.MATCH_PARENT,
-            layerHeight,
+            WindowManager.LayoutParams.MATCH_PARENT,
             Gravity.TOP or Gravity.START,
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         )
@@ -380,7 +371,7 @@ class GameBypassService : AccessibilityService() {
     }
 
     private fun removeItemsLayer() {
-        itemViews.clear(); readings.clear()
+        itemViews.clear()
         itemsLayer?.let { runCatching { wm.removeView(it) } }
         itemsLayer = null
         itemsParams = null
@@ -522,7 +513,7 @@ class GameBypassService : AccessibilityService() {
         if (on) {
             // Let touches fall through our invisible items to the game.
             itemsLayer?.removeAllViews()
-            itemViews.clear(); readings.clear()
+            itemViews.clear()
             currentTexts = emptySet()
             setItemsTouchable(false)
         } else {
@@ -606,9 +597,9 @@ class GameBypassService : AccessibilityService() {
         if (!bypassOn) return
         val bar = controlBarRect()
         val screenH = wm.currentWindowMetrics.bounds.height()
-        data class Found(val item: Item, val confidence: Float, val pass: Int)
-        val found = results.withIndex().flatMap { (pass, r) -> r.textBlocks.flatMap { it.lines }.map { pass to it } }
-            .mapNotNull { (pass, line) ->
+        data class Found(val item: Item, val confidence: Float)
+        val found = results.flatMap { r -> r.textBlocks.flatMap { it.lines } }
+            .mapNotNull { line ->
                 val raw = line.boundingBox ?: return@mapNotNull null
                 val box = Rect(
                     (raw.left * scaleX).toInt(), (raw.top * scaleY).toInt(),
@@ -625,17 +616,13 @@ class GameBypassService : AccessibilityService() {
                 // Tiny specks.
                 if (box.height() < 12) return@mapNotNull null
                 if (bar != null && Rect.intersects(bar, box) && box.centerY() > bar.top) return@mapNotNull null
-                Found(Item(words, box), line.confidence, pass)
+                Found(Item(words, box), line.confidence)
             }
-        // Trust the normal reading first. The high-contrast reading only adds words
-        // in places where the normal reading found nothing, so the two never get
-        // mixed into one jumbled name.
+        // Both reading passes often find the same words. Keep the most confident one.
         val kept = mutableListOf<Found>()
-        for (f in found.filter { it.pass == 0 }.sortedByDescending { it.confidence }) {
-            if (kept.none { k -> overlapRatio(k.item.rect, f.item.rect) > 0.5f }) kept.add(f)
-        }
-        for (f in found.filter { it.pass != 0 }.sortedByDescending { it.confidence }) {
-            if (kept.none { k -> overlapRatio(k.item.rect, f.item.rect) > 0.2f }) kept.add(f)
+        for (f in found.sortedByDescending { it.confidence }) {
+            val dup = kept.any { k -> overlapRatio(k.item.rect, f.item.rect) > 0.5f }
+            if (!dup) kept.add(f)
         }
         val lines = kept.map { it.item }
         val baseItems = orderForReading(mergeNearbyLines(lines))
@@ -683,21 +670,9 @@ class GameBypassService : AccessibilityService() {
         if (!announceCount && similarity(texts, currentTexts) >= 0.7) {
             // Same screen: quietly update names and positions, keeping the same
             // buttons, so TalkBack doesn't lose your place.
-            pendingTexts = null
             buildItems(items)
             return
         }
-        // A new screen. Games often show an in-between moment (a fade, a half-loaded
-        // menu), so read again quickly and only rebuild once two readings agree.
-        if (!announceCount) {
-            val pending = pendingTexts
-            if (pending == null || similarity(texts, pending) < 0.7) {
-                pendingTexts = texts
-                handler.postDelayed({ scan() }, 700)
-                return
-            }
-        }
-        pendingTexts = null
         val firstTime = currentTexts.isEmpty()
         currentTexts = texts
         buildItems(items)
@@ -882,7 +857,7 @@ class GameBypassService : AccessibilityService() {
     private fun buildHearthstone(entries: List<HearthstoneBoard.Entry>) {
         val layer = itemsLayer ?: return
         layer.removeAllViews()
-        itemViews.clear(); readings.clear()
+        itemViews.clear()
         val pad = (4 * resources.displayMetrics.density).toInt()
         var refocus: View? = null
         for (e in entries) {
@@ -1458,7 +1433,7 @@ class GameBypassService : AccessibilityService() {
         // Leftovers from something else (like a Hearthstone match): start clean.
         if (layer.childCount != itemViews.size) {
             layer.removeAllViews()
-            itemViews.clear(); readings.clear()
+            itemViews.clear()
         }
         val screen = wm.currentWindowMetrics.bounds
         // Make each button's touch area bigger (toward its neighbors), then fill
@@ -1481,26 +1456,12 @@ class GameBypassService : AccessibilityService() {
             real.minByOrNull { distance(it.first.rect, focusedOld.first.rect) }?.first
         } else null
 
-        for ((raw, area) in all) {
-            val key = normKey(raw.text)
-            val match = (if (raw === focusTarget) focusedOld else null) ?: old
+        for ((item, area) in all) {
+            val key = normKey(item.text)
+            val match = (if (item === focusTarget) focusedOld else null) ?: old
                 .filter { normKey(it.first.text) == key }
-                .minByOrNull { distance(it.first.rect, raw.rect) }
-                ?.takeIf { distance(it.first.rect, raw.rect) < near }
-                // A slightly different reading of the same button, like "Spln" for "Spin".
-                ?: old
-                    .filter { distance(it.first.rect, raw.rect) < near / 2 && similarText(it.first.text, raw.text) }
-                    .minByOrNull { distance(it.first.rect, raw.rect) }
-            // Majority vote: use the name this button was read as most often lately.
-            val item = if (match != null && raw !in empties) {
-                val history = readings.getOrPut(match.second) { mutableListOf(match.first.text) }
-                history += raw.text
-                while (history.size > 6) history.removeAt(0)
-                val counts = history.groupingBy { it }.eachCount()
-                val best = counts.maxOf { it.value }
-                val voted = history.last { counts[it] == best }
-                if (voted == raw.text) raw else raw.copy(text = voted)
-            } else raw
+                .minByOrNull { distance(it.first.rect, item.rect) }
+                ?.takeIf { distance(it.first.rect, item.rect) < near }
             val view = if (match != null) {
                 old.remove(match)
                 match.second
@@ -1517,7 +1478,7 @@ class GameBypassService : AccessibilityService() {
                     leftMargin = left; topMargin = top
                 }
                 // Empty areas go underneath, so real buttons sit on top of them.
-                if (raw in empties) layer.addView(view, 0, lp) else layer.addView(view, lp)
+                if (item in empties) layer.addView(view, 0, lp) else layer.addView(view, lp)
             } else {
                 val lp = view.layoutParams as FrameLayout.LayoutParams
                 if (lp.leftMargin != left || lp.topMargin != top || lp.width != area.width() || lp.height != area.height()) {
@@ -1530,7 +1491,7 @@ class GameBypassService : AccessibilityService() {
         }
         // Buttons that aren't on the screen anymore.
         val lostFocus = old.firstOrNull { it.second === focusedView }
-        old.forEach { layer.removeView(it.second); readings.remove(it.second) }
+        old.forEach { layer.removeView(it.second) }
         itemViews.clear()
         itemViews.addAll(fresh)
         // If the button you were on is gone anyway, go to the closest new one
@@ -1543,26 +1504,6 @@ class GameBypassService : AccessibilityService() {
                     v.post { v.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null) }
                 }
         }
-    }
-
-    /** Two readings that are almost the same word, like "Spln" and "Spin". */
-    private fun similarText(a: String, b: String): Boolean {
-        val x = a.lowercase()
-        val y = b.lowercase()
-        if (x == y) return true
-        val longest = max(x.length, y.length)
-        if (longest < 3) return false
-        val row = IntArray(y.length + 1) { it }
-        for (i in 1..x.length) {
-            var prev = row[0]
-            row[0] = i
-            for (j in 1..y.length) {
-                val cur = row[j]
-                row[j] = minOf(row[j] + 1, row[j - 1] + 1, prev + if (x[i - 1] == y[j - 1]) 0 else 1)
-                prev = cur
-            }
-        }
-        return 1f - row[y.length].toFloat() / longest >= 0.6f
     }
 
     private fun distance(a: Rect, b: Rect): Float {
@@ -1728,6 +1669,11 @@ class GameBypassService : AccessibilityService() {
             if (layer != null && params != null && layer.parent == null) {
                 if (directTouch || imeShowing) params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 runCatching { wm.addView(layer, params) }
+                // Keep the bottom strip on top so you can still find it by touch.
+                controlBar?.let { bar ->
+                    val lp = bar.layoutParams
+                    runCatching { wm.removeViewImmediate(bar); wm.addView(bar, lp) }
+                }
                 // Put TalkBack back on the item you were on.
                 focusedView?.let { v ->
                     v.post { v.performAccessibilityAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null) }
