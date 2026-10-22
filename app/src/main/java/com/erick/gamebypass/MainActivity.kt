@@ -1,6 +1,7 @@
 package com.erick.gamebypass
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.view.View
@@ -52,6 +53,7 @@ class MainActivity : Activity() {
                 Direct touch sends your taps straight to the game. Turn it off with the same button.
                 While direct touch is on, it keeps watching the screen and says any new words the game shows, like Swipe right to dodge, so you can just do it.
                 Pause turns Game Bypass Mode off for this game until you leave it.
+                To keep Game Bypass off in an app for good, use Add an app in the Apps section below.
 
                 If it finds no text three times in a row, it switches to direct touch by itself, and switches back when a menu with text shows up.
 
@@ -74,6 +76,12 @@ class MainActivity : Activity() {
             textSize = 20f
             setPadding(0, pad * 2, 0, 0)
             isAccessibilityHeading = true
+        })
+        layout.addView(Button(this).apply {
+            text = "Add an app"
+            isAllCaps = false
+            contentDescription = "Add an app. Choose an app where Game Bypass should always stay off."
+            setOnClickListener { pickAppToExclude() }
         })
         appsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         layout.addView(appsBox)
@@ -126,13 +134,13 @@ class MainActivity : Activity() {
         if (never.isEmpty() && accessible.isEmpty()) {
             appsBox.addView(TextView(this).apply {
                 textSize = 17f
-                text = "No apps are blocked. Game Bypass stays out of apps you can already use, and remembers them here."
+                text = "No apps on the list yet. Game Bypass stays out of apps you can already use and remembers them here. You can also use Add an app to pick apps yourself."
             })
             return
         }
         for (pkg in never.sortedBy { label(it).lowercase() }) {
             appsBox.addView(Button(this).apply {
-                text = "${label(pkg)}: you turned Game Bypass off. Double tap to turn it back on."
+                text = "${label(pkg)}: Game Bypass stays off. Double tap to remove it from this list."
                 isAllCaps = false
                 setOnClickListener {
                     prefs.edit().putStringSet("never", never - pkg).apply()
@@ -154,6 +162,47 @@ class MainActivity : Activity() {
                 }
             })
         }
+    }
+
+    /**
+     * Shows a list of the apps on your phone. The one you pick goes on the
+     * "Game Bypass stays off" list.
+     */
+    private fun pickAppToExclude() {
+        val prefs = getSharedPreferences("apps", MODE_PRIVATE)
+        val never = prefs.getStringSet("never", emptySet()) ?: emptySet()
+        val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val apps = packageManager.queryIntentActivities(launcher, 0)
+            .map { it.activityInfo.packageName }
+            .distinct()
+            .filter { it != packageName && it !in never }
+            .map { pkg ->
+                pkg to runCatching {
+                    packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+                }.getOrDefault(pkg)
+            }
+            .sortedBy { it.second.lowercase() }
+        if (apps.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setMessage("There are no more apps to add.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Choose an app where Game Bypass stays off")
+            .setItems(apps.map { it.second }.toTypedArray()) { _, which ->
+                val pkg = apps[which].first
+                val always = prefs.getStringSet("always", emptySet()) ?: emptySet()
+                prefs.edit()
+                    .putStringSet("never", never + pkg)
+                    .putStringSet("always", always - pkg)
+                    .apply()
+                showApps()
+                announceForAccessibility("${apps[which].second} added. Game Bypass will stay off there.")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun currentBuild(): Int =
