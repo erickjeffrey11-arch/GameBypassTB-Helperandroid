@@ -199,7 +199,7 @@ class MainActivity : Activity() {
                     .putStringSet("always", always - pkg)
                     .apply()
                 showApps()
-                announceForAccessibility("${apps[which].second} added. Game Bypass will stay off there.")
+                window.decorView.announceForAccessibility("${apps[which].second} added. Game Bypass will stay off there.")
             }
             .setNegativeButton("Cancel", null)
             .show()
