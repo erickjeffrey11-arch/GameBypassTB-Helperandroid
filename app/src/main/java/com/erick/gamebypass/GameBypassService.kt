@@ -1542,6 +1542,41 @@ class GameBypassService : AccessibilityService() {
     }
 
     /**
+     * Is this part of the screen really blank (one flat color), or is something drawn
+     * there? Looks at a small copy of the last screenshot and counts how often
+     * neighboring dots are noticeably different.
+     */
+    private fun looksBlank(screenRect: Rect): Boolean {
+        val shot = lastShot ?: return false
+        if (shot.isRecycled) return false
+        val r = Rect(
+            (screenRect.left / scaleX).toInt(), (screenRect.top / scaleY).toInt(),
+            (screenRect.right / scaleX).toInt(), (screenRect.bottom / scaleY).toInt()
+        )
+        if (!r.intersect(0, 0, shot.width, shot.height) || r.width() < 4 || r.height() < 4) return false
+        val sw = 48
+        val sh = 48
+        val small = runCatching {
+            Bitmap.createScaledBitmap(Bitmap.createBitmap(shot, r.left, r.top, r.width(), r.height()), sw, sh, true)
+        }.getOrNull() ?: return false
+        val px = IntArray(sw * sh)
+        small.getPixels(px, 0, sw, 0, 0, sw, sh)
+        small.recycle()
+        fun lum(c: Int) = (((c shr 16) and 255) * 3 + ((c shr 8) and 255) * 6 + (c and 255)) / 10
+        var different = 0
+        var pairs = 0
+        for (y in 0 until sh) for (x in 0 until sw - 1) {
+            pairs++
+            if (kotlin.math.abs(lum(px[y * sw + x]) - lum(px[y * sw + x + 1])) > 25) different++
+        }
+        for (y in 0 until sh - 1) for (x in 0 until sw) {
+            pairs++
+            if (kotlin.math.abs(lum(px[y * sw + x]) - lum(px[(y + 1) * sw + x])) > 25) different++
+        }
+        return different.toFloat() / pairs < 0.02f
+    }
+
+    /**
      * Splits the screen into 9 parts (top left, top, top right, ... bottom right).
      * Any part with no buttons gets an "Empty area" item, so it isn't silent.
      * Double tap taps the game there; Describe tells you what that part looks like.
@@ -1563,7 +1598,8 @@ class GameBypassService : AccessibilityService() {
             }
             // Mostly empty (less than a quarter covered by buttons).
             if (covered * 4 < cell.width().toLong() * cell.height()) {
-                out += Item("Empty area, ${names[row * 3 + col]}", cell)
+                val what = if (looksBlank(cell)) "Nothing visible" else "Picture, no words"
+                out += Item("$what, ${names[row * 3 + col]}", cell)
             }
         }
         return out
