@@ -86,8 +86,9 @@ class GameBypassService : AccessibilityService() {
     private var currentTexts: Set<String> = emptySet()
     private var checkPending = false
     private var unreadableSince: Long? = null
-    // Which way you scrolled last, so "scroll forward" goes the same way next time.
-    private var lastScrollSideways = false
+    // A scroll waiting for its result: which way, and what was on screen before.
+    private var scrollDirection: String? = null
+    private var beforeScroll: Set<String> = emptySet()
     private var focusedRect: Rect? = null
     private var lastTapAt = 0L
     private var scaleX = 1f
@@ -670,6 +671,24 @@ class GameBypassService : AccessibilityService() {
             return
         }
 
+        // The result of a scroll: say which way and whether anything moved.
+        val scrolled = scrollDirection
+        if (scrolled != null) {
+            scrollDirection = null
+            val fresh = texts.count { it !in beforeScroll }
+            currentTexts = texts
+            buildItems(items)
+            autoLabel(items)
+            if (fresh > 0) {
+                beep(ok = true)
+                setStatus("Scrolled $scrolled. $fresh new button${if (fresh == 1) "" else "s"}.")
+            } else {
+                beep(ok = false)
+                setStatus("Didn't move. Maybe the end of the list.")
+            }
+            return
+        }
+
         if (!announceCount && similarity(texts, currentTexts) >= 0.7) {
             // Same screen: quietly update names and positions, keeping the same
             // buttons, so TalkBack doesn't lose your place.
@@ -980,7 +999,7 @@ class GameBypassService : AccessibilityService() {
     }
 
     /** Drags a finger from one spot to another, like playing a card or attacking. */
-    private fun dragFrom(from: Rect, to: Rect) {
+    private fun dragFrom(from: Rect, to: Rect, duration: Long = 450, quiet: Boolean = false) {
         lastTapAt = System.currentTimeMillis()
         tapping = true
         itemsLayer?.let { runCatching { wm.removeViewImmediate(it) } }
@@ -990,11 +1009,11 @@ class GameBypassService : AccessibilityService() {
             lineTo(to.exactCenterX(), to.exactCenterY())
         }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 450))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
             .build()
         handler.postDelayed({
             val sent = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(g: GestureDescription?) { beep(ok = true); afterTap() }
+                override fun onCompleted(g: GestureDescription?) { if (!quiet) beep(ok = true); afterTap() }
                 override fun onCancelled(g: GestureDescription?) {
                     beep(ok = false); setStatus("The move was cancelled by Android."); afterTap()
                 }
@@ -1377,16 +1396,14 @@ class GameBypassService : AccessibilityService() {
                 }
 
                 override fun performAccessibilityAction(host: View, action: Int, args: android.os.Bundle?): Boolean {
-                    // Show more content: "down" means drag the list up, like a finger flicking up.
                     when (action) {
-                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id -> scrollGame(0f, -1f)
-                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id -> scrollGame(0f, 1f)
-                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id -> scrollGame(-1f, 0f)
-                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id -> scrollGame(1f, 0f)
-                        AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ->
-                            if (lastScrollSideways) scrollGame(-1f, 0f) else scrollGame(0f, -1f)
-                        AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD ->
-                            if (lastScrollSideways) scrollGame(1f, 0f) else scrollGame(0f, 1f)
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id,
+                        AccessibilityNodeInfo.ACTION_SCROLL_FORWARD -> scrollGame("down")
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id,
+                        AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> scrollGame("up")
+                        // Sideways only from the TalkBack menu, never from a swipe.
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id -> scrollGame("right")
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id -> scrollGame("left")
                         else -> return super.performAccessibilityAction(host, action, args)
                     }
                     return true
@@ -1399,8 +1416,11 @@ class GameBypassService : AccessibilityService() {
         override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> { downX = e.rawX; downY = e.rawY; dragging = false }
+                // Up and down only. Sideways two-finger swipes are left alone,
+                // so they never get in the way of TalkBack's back gesture.
                 MotionEvent.ACTION_MOVE -> if (!dragging &&
-                    kotlin.math.hypot(e.rawX - downX, e.rawY - downY) > minDrag
+                    kotlin.math.abs(e.rawY - downY) > minDrag &&
+                    kotlin.math.abs(e.rawY - downY) > kotlin.math.abs(e.rawX - downX)
                 ) {
                     dragging = true
                     return true
@@ -1415,7 +1435,10 @@ class GameBypassService : AccessibilityService() {
                 MotionEvent.ACTION_UP -> {
                     val dx = e.rawX - downX
                     val dy = e.rawY - downY
-                    if (dragging || kotlin.math.hypot(dx, dy) > minDrag) scrollGame(dx, dy)
+                    // Fingers moved up = show what's further down, like any app.
+                    if (kotlin.math.abs(dy) > minDrag && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
+                        scrollGame(if (dy < 0) "down" else "up")
+                    }
                     dragging = false
                 }
                 MotionEvent.ACTION_CANCEL -> dragging = false
@@ -1425,26 +1448,29 @@ class GameBypassService : AccessibilityService() {
     }
 
     /**
-     * Drags the game's screen in the direction you scrolled (only the main direction:
-     * up, down, left or right), from the middle of the screen, then reads it again.
+     * Scrolls the game: "down" shows what's further down (the finger moves up),
+     * "up" goes back. Uses a long, slow drag like a real finger, then reads the
+     * screen again and tells you whether anything moved.
      */
-    private fun scrollGame(dx: Float, dy: Float) {
+    private fun scrollGame(direction: String) {
         if (!bypassOn || tapping) return
-        val screen = wm.currentWindowMetrics.bounds
-        val cx = screen.exactCenterX()
-        val cy = screen.exactCenterY()
-        val sideways = kotlin.math.abs(dx) > kotlin.math.abs(dy)
-        lastScrollSideways = sideways
-        val (ex, ey) = if (sideways) {
-            (cx + kotlin.math.sign(dx) * screen.width() * 0.35f) to cy
-        } else {
-            cx to (cy + kotlin.math.sign(dy) * screen.height() * 0.35f)
+        val b = wm.currentWindowMetrics.bounds
+        val cx = b.exactCenterX()
+        val cy = b.exactCenterY()
+        val (sx, sy, ex, ey) = when (direction) {
+            "down" -> listOf(cx, b.height() * 0.72f, cx, b.height() * 0.28f)
+            "up" -> listOf(cx, b.height() * 0.28f, cx, b.height() * 0.72f)
+            "right" -> listOf(b.width() * 0.75f, cy, b.width() * 0.25f, cy)
+            else -> listOf(b.width() * 0.25f, cy, b.width() * 0.75f, cy)
         }
-        setStatus("Scrolling.")
-        currentTexts = emptySet()
+        scrollDirection = direction
+        beforeScroll = latestItems.map { normKey(it.text) }.toSet()
+        setStatus("Scrolling $direction.")
         dragFrom(
-            Rect(cx.toInt() - 2, cy.toInt() - 2, cx.toInt() + 2, cy.toInt() + 2),
-            Rect(ex.toInt() - 2, ey.toInt() - 2, ex.toInt() + 2, ey.toInt() + 2)
+            Rect(sx.toInt() - 2, sy.toInt() - 2, sx.toInt() + 2, sy.toInt() + 2),
+            Rect(ex.toInt() - 2, ey.toInt() - 2, ex.toInt() + 2, ey.toInt() + 2),
+            duration = 650,
+            quiet = true
         )
     }
 
