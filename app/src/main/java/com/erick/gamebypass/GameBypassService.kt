@@ -683,6 +683,8 @@ class GameBypassService : AccessibilityService() {
             // buttons, so TalkBack doesn't lose your place.
             buildItems(items)
             labelPictures()
+            // New words that popped up on this screen, like "You win!": say them right away.
+            speakNewGameText(items)
             return
         }
         val firstTime = currentTexts.isEmpty()
@@ -693,6 +695,9 @@ class GameBypassService : AccessibilityService() {
         buildItems(items)
         labelPictures()
         autoLabel(items)
+        // A whole new screen: its words count as already heard, so only words that
+        // pop up later get spoken.
+        markAsHeard(items)
         val count = "${items.size} button${if (items.size == 1) "" else "s"}"
         setStatus(
             when {
@@ -724,6 +729,14 @@ class GameBypassService : AccessibilityService() {
         }
         if (fresh.isNotEmpty()) {
             speakGame(prefix + fresh.take(3).joinToString(". ") { it.text })
+        }
+    }
+
+    private fun markAsHeard(items: List<Item>) {
+        val now = System.currentTimeMillis()
+        for (item in items) {
+            val key = item.text.lowercase().replace(Regex("[0-9]+"), "#").trim()
+            if (key.any { it.isLetter() }) spokenAt[key] = now
         }
     }
 
