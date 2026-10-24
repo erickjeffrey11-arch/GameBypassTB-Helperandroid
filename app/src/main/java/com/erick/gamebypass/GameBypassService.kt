@@ -27,6 +27,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.Display
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -85,6 +86,8 @@ class GameBypassService : AccessibilityService() {
     private var currentTexts: Set<String> = emptySet()
     private var checkPending = false
     private var unreadableSince: Long? = null
+    // Which way you scrolled last, so "scroll forward" goes the same way next time.
+    private var lastScrollSideways = false
     private var focusedRect: Rect? = null
     private var lastTapAt = 0L
     private var scaleX = 1f
@@ -352,7 +355,7 @@ class GameBypassService : AccessibilityService() {
 
     private fun showItemsLayer() {
         if (itemsLayer != null) return
-        val layer = FrameLayout(this)
+        val layer = ItemsLayer()
         layer.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         val params = overlayParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -1343,6 +1346,106 @@ class GameBypassService : AccessibilityService() {
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------ scrolling
+
+    /**
+     * The layer that holds the invisible buttons. It tells TalkBack it can scroll,
+     * and turns TalkBack's scrolling (two-finger swipes and scroll commands) into a
+     * real drag in the game.
+     */
+    private inner class ItemsLayer : FrameLayout(this@GameBypassService) {
+        private var downX = 0f
+        private var downY = 0f
+        private var dragging = false
+        private val minDrag get() = 0.08f * min(width, height)
+
+        init {
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            accessibilityDelegate = object : View.AccessibilityDelegate() {
+                override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                    super.onInitializeAccessibilityNodeInfo(host, info)
+                    info.className = "android.widget.ScrollView"
+                    info.isScrollable = true
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP)
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN)
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT)
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT)
+                }
+
+                override fun performAccessibilityAction(host: View, action: Int, args: android.os.Bundle?): Boolean {
+                    // Show more content: "down" means drag the list up, like a finger flicking up.
+                    when (action) {
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id -> scrollGame(0f, -1f)
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id -> scrollGame(0f, 1f)
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id -> scrollGame(-1f, 0f)
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id -> scrollGame(1f, 0f)
+                        AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ->
+                            if (lastScrollSideways) scrollGame(-1f, 0f) else scrollGame(0f, -1f)
+                        AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD ->
+                            if (lastScrollSideways) scrollGame(1f, 0f) else scrollGame(0f, 1f)
+                        else -> return super.performAccessibilityAction(host, action, args)
+                    }
+                    return true
+                }
+            }
+        }
+
+        // TalkBack sends a two-finger swipe to the app as a drag. Catch it here,
+        // before the invisible buttons do, and repeat it in the game.
+        override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { downX = e.rawX; downY = e.rawY; dragging = false }
+                MotionEvent.ACTION_MOVE -> if (!dragging &&
+                    kotlin.math.hypot(e.rawX - downX, e.rawY - downY) > minDrag
+                ) {
+                    dragging = true
+                    return true
+                }
+            }
+            return false
+        }
+
+        override fun onTouchEvent(e: MotionEvent): Boolean {
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { downX = e.rawX; downY = e.rawY; dragging = false }
+                MotionEvent.ACTION_UP -> {
+                    val dx = e.rawX - downX
+                    val dy = e.rawY - downY
+                    if (dragging || kotlin.math.hypot(dx, dy) > minDrag) scrollGame(dx, dy)
+                    dragging = false
+                }
+                MotionEvent.ACTION_CANCEL -> dragging = false
+            }
+            return true
+        }
+    }
+
+    /**
+     * Drags the game's screen in the direction you scrolled (only the main direction:
+     * up, down, left or right), from the middle of the screen, then reads it again.
+     */
+    private fun scrollGame(dx: Float, dy: Float) {
+        if (!bypassOn || tapping) return
+        val screen = wm.currentWindowMetrics.bounds
+        val cx = screen.exactCenterX()
+        val cy = screen.exactCenterY()
+        val sideways = kotlin.math.abs(dx) > kotlin.math.abs(dy)
+        lastScrollSideways = sideways
+        val (ex, ey) = if (sideways) {
+            (cx + kotlin.math.sign(dx) * screen.width() * 0.35f) to cy
+        } else {
+            cx to (cy + kotlin.math.sign(dy) * screen.height() * 0.35f)
+        }
+        setStatus("Scrolling.")
+        currentTexts = emptySet()
+        dragFrom(
+            Rect(cx.toInt() - 2, cy.toInt() - 2, cx.toInt() + 2, cy.toInt() + 2),
+            Rect(ex.toInt() - 2, ey.toInt() - 2, ex.toInt() + 2, ey.toInt() + 2)
+        )
     }
 
     private fun similarity(a: Set<String>, b: Set<String>): Double {
