@@ -157,6 +157,7 @@ class GameBypassService : AccessibilityService() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         ignoredPackages.add(packageName)
         ignoredPackages.addAll(findHomePackages())
+        WordFixer.load(this)
         tts = TextToSpeech(this) { status ->
             ttsReady = status == TextToSpeech.SUCCESS
             if (ttsReady) {
@@ -605,7 +606,7 @@ class GameBypassService : AccessibilityService() {
                     (raw.left * scaleX).toInt(), (raw.top * scaleY).toInt(),
                     (raw.right * scaleX).toInt(), (raw.bottom * scaleY).toInt()
                 )
-                val words = cleanText(line.text) ?: return@mapNotNull null
+                val words = cleanText(line.text)?.let { WordFixer.fix(it) } ?: return@mapNotNull null
                 // The reader's own "how sure am I" score. Low = probably game art, not words.
                 // Big text is usually a real button, so it gets a gentler check.
                 val big = box.height() > screenH * 0.03f
