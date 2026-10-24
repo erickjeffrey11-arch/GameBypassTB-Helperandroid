@@ -131,6 +131,31 @@ class GameBypassService : AccessibilityService() {
     // the screen; this voice doesn't, so you hear instructions while you play.
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    // The speech engine for announcements, picked in the app (empty = phone default).
+    private val voicePrefs by lazy { getSharedPreferences("voice", MODE_PRIVATE) }
+    private val voiceListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "engine") startVoice(sayHello = true)
+    }
+
+    /** Starts the announcement voice with the chosen speech engine. */
+    private fun startVoice(sayHello: Boolean) {
+        runCatching { tts?.shutdown() }
+        ttsReady = false
+        val engine = voicePrefs.getString("engine", "")?.takeIf { it.isNotEmpty() }
+        val listener = TextToSpeech.OnInitListener { status ->
+            ttsReady = status == TextToSpeech.SUCCESS
+            if (ttsReady) {
+                tts?.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                if (sayHello) speakGame("This is the announcement voice.")
+            }
+        }
+        tts = if (engine != null) TextToSpeech(this, listener, engine) else TextToSpeech(this, listener)
+    }
 
     // Direct touch: words already spoken, and when, so we don't repeat them.
     private val spokenAt = mutableMapOf<String, Long>()
@@ -166,17 +191,8 @@ class GameBypassService : AccessibilityService() {
         ignoredPackages.add(packageName)
         ignoredPackages.addAll(findHomePackages())
         WordFixer.load(this)
-        tts = TextToSpeech(this) { status ->
-            ttsReady = status == TextToSpeech.SUCCESS
-            if (ttsReady) {
-                tts?.setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-            }
-        }
+        startVoice(sayHello = false)
+        voicePrefs.registerOnSharedPreferenceChangeListener(voiceListener)
         Log.i(tag, "Connected. Ignoring: $ignoredPackages")
     }
 
@@ -190,6 +206,7 @@ class GameBypassService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        runCatching { voicePrefs.unregisterOnSharedPreferenceChangeListener(voiceListener) }
         tts?.shutdown()
         runCatching { labeler.close() }
         tts = null

@@ -19,6 +19,7 @@ class MainActivity : Activity() {
     private lateinit var updateButton: Button
     private var latest: Updater.Release? = null
     private lateinit var appsBox: LinearLayout
+    private lateinit var engineButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -46,7 +47,7 @@ class MainActivity : Activity() {
                 3. If Android says it's a restricted setting: go to Settings, Apps, Game Bypass TB Helper, then the More options menu at the top right, and choose Allow restricted settings. Then try step 2 again.
 
                 How it works:
-                Keep TalkBack on. Game Bypass stays out of apps TalkBack can already read. When you open a game TalkBack can't read, you'll hear Game Bypass Mode on, and how many items it found. Swipe through them, or slide your finger around the screen. Double tap an item to press it in the game. When new words pop up on the screen you're on, like You win, they're said right away.
+                Keep TalkBack on. Game Bypass stays out of apps TalkBack can already read. When you open a game TalkBack can't read, you'll hear Game Bypass Mode on, and how many items it found. Swipe through them, or slide your finger around the screen. Double tap an item to press it in the game. When new words pop up on the screen you're on, like You win, they're said right away. You can pick the speech engine for these announcements in the Announcement voice section below.
 
                 Along the very bottom edge of the screen there's a thin strip of buttons: Rescan, Direct touch, and Pause. Swipe to reach them.
                 Rescan reads the screen again.
@@ -85,6 +86,20 @@ class MainActivity : Activity() {
         })
         appsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         layout.addView(appsBox)
+
+        // ---- Announcement voice
+        layout.addView(TextView(this).apply {
+            text = "Announcement voice"
+            textSize = 20f
+            setPadding(0, pad * 2, 0, 0)
+            isAccessibilityHeading = true
+        })
+        engineButton = Button(this).apply {
+            isAllCaps = false
+            setOnClickListener { pickEngine() }
+        }
+        layout.addView(engineButton)
+        showEngine()
 
         // ---- Check for updates
         layout.addView(TextView(this).apply {
@@ -200,6 +215,34 @@ class MainActivity : Activity() {
                     .apply()
                 showApps()
                 window.decorView.announceForAccessibility("${apps[which].second} added. Game Bypass will stay off there.")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Speech engines installed on the phone: (package, name). */
+    private fun engines(): List<Pair<String, String>> =
+        packageManager.queryIntentServices(Intent(android.speech.tts.TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0)
+            .map { it.serviceInfo.packageName to it.loadLabel(packageManager).toString() }
+            .distinctBy { it.first }
+            .sortedBy { it.second.lowercase() }
+
+    private fun showEngine() {
+        val chosen = getSharedPreferences("voice", MODE_PRIVATE).getString("engine", "") ?: ""
+        val name = if (chosen.isEmpty()) "Phone default"
+        else engines().firstOrNull { it.first == chosen }?.second ?: chosen
+        engineButton.text = "Speech engine: $name. Double tap to change."
+    }
+
+    /** Lets you pick which speech engine says the helper's announcements. */
+    private fun pickEngine() {
+        val list = listOf("" to "Phone default") + engines()
+        AlertDialog.Builder(this)
+            .setTitle("Speech engine for announcements")
+            .setItems(list.map { it.second }.toTypedArray()) { _, which ->
+                getSharedPreferences("voice", MODE_PRIVATE).edit()
+                    .putString("engine", list[which].first).apply()
+                showEngine()
             }
             .setNegativeButton("Cancel", null)
             .show()
