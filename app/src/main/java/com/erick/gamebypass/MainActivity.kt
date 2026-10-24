@@ -57,7 +57,7 @@ class MainActivity : Activity() {
 
                 If it finds no text three times in a row, it switches to direct touch by itself, and switches back when a menu with text shows up.
 
-                Sliding your finger anywhere on the screen always says something. Parts with no buttons say Nothing visible if they're blank, or Picture, no words if something is drawn there, plus where it is.
+                Sliding your finger anywhere on the screen always says something. Parts with no buttons say Nothing visible if they're blank, or Picture if something is drawn there, plus what it might be, like Picture: coin, chest, and where it is. Those guesses can be wrong on cartoon art.
 
                 When you go home, it turns off and TalkBack works normally.
             """.trimIndent()

@@ -38,6 +38,8 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.erick.gamebypass.HearthstoneBoard.Kind as K
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.label.ImageLabeling
+import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -85,6 +87,12 @@ class GameBypassService : AccessibilityService() {
     private var currentTexts: Set<String> = emptySet()
     private var checkPending = false
     private var unreadableSince: Long? = null
+    // Image Labeling: what's in "Picture, no words" spots on the current screen.
+    private val pictureLabels = HashMap<String, String>()
+    private val labelingNow = HashSet<String>()
+    private val imageLabeler by lazy {
+        ImageLabeling.getClient(ImageLabelerOptions.Builder().setConfidenceThreshold(0.5f).build())
+    }
     private var focusedRect: Rect? = null
     private var lastTapAt = 0L
     private var scaleX = 1f
@@ -325,6 +333,8 @@ class GameBypassService : AccessibilityService() {
 
     private fun turnOff(announce: Boolean) {
         if (!bypassOn) return
+        pictureLabels.clear()
+        labelingNow.clear()
         bypassOn = false
         handler.removeCallbacks(periodicScan)
         setDirectTouch(false, auto = false, speak = false)
@@ -672,11 +682,16 @@ class GameBypassService : AccessibilityService() {
             // Same screen: quietly update names and positions, keeping the same
             // buttons, so TalkBack doesn't lose your place.
             buildItems(items)
+            labelPictures()
             return
         }
         val firstTime = currentTexts.isEmpty()
         currentTexts = texts
+        // New screen: the old picture labels don't apply anymore.
+        pictureLabels.clear()
+        labelingNow.clear()
         buildItems(items)
+        labelPictures()
         autoLabel(items)
         val count = "${items.size} button${if (items.size == 1) "" else "s"}"
         setStatus(
@@ -1235,10 +1250,44 @@ class GameBypassService : AccessibilityService() {
         if (old != null && old !== bmp) old.recycle()
     }
 
+    /**
+     * For each "Picture, no words" spot, asks Google's Image Labeling (free, offline,
+     * packed in the app) what's there, like "coin" or "chest", and adds it to the name:
+     * "Picture: coin, chest, top right".
+     */
+    private fun labelPictures() {
+        for ((item, view) in itemViews.toList()) {
+            val text = item.text
+            if (!text.startsWith("Picture, no words, ")) continue
+            if (pictureLabels.containsKey(text) || text in labelingNow) continue
+            val crop = cropAround(item.rect, wide = false) ?: continue
+            labelingNow += text
+            imageLabeler.process(InputImage.fromBitmap(crop, 0))
+                .addOnSuccessListener { labels ->
+                    crop.recycle()
+                    if (text !in labelingNow) return@addOnSuccessListener // screen changed meanwhile
+                    labelingNow -= text
+                    val names = labels.sortedByDescending { it.confidence }
+                        .take(3).map { it.text.lowercase() }
+                    val where = text.removePrefix("Picture, no words, ")
+                    val label = if (names.isEmpty()) text else "Picture: ${names.joinToString(", ")}, $where"
+                    pictureLabels[text] = label
+                    // Update the button now, if it's still there.
+                    itemViews.firstOrNull { it.first.text == text }?.second?.contentDescription = label
+                }
+                .addOnFailureListener {
+                    crop.recycle()
+                    labelingNow -= text
+                    pictureLabels[text] = text
+                }
+        }
+    }
+
     private fun labelKey(item: Item) =
         "${currentPackage}|${item.text.lowercase()}|${item.rect.centerX() / 60}|${item.rect.centerY() / 60}"
 
     private fun labelFor(item: Item): String {
+        pictureLabels[item.text]?.let { return it }
         val saved = labelPrefs.getString(labelKey(item), null)
         return if (saved != null) "${item.text}, $saved" else item.text
     }

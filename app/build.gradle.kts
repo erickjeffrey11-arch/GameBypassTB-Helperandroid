@@ -47,6 +47,8 @@ android {
 dependencies {
     // Google's offline text reader (OCR). The model is bundled inside the app.
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    // Image Labeling: names things in pictures (coin, chest...). Packed in the app, offline.
+    implementation("com.google.mlkit:image-labeling:17.0.9")
     // Smart labels: the phone's built-in offline AI (Gemini Nano) describing pictures.
     implementation("com.google.mlkit:genai-image-description:1.0.0-beta1")
 }
