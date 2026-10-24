@@ -57,8 +57,6 @@ class MainActivity : Activity() {
 
                 If it finds no text three times in a row, it switches to direct touch by itself, and switches back when a menu with text shows up.
 
-                To scroll a game's list up or down, use a two-finger swipe, like in any app. Scrolling from the TalkBack menu works too, including sideways. After scrolling, a beep and Scrolled down plus the number of new buttons means it moved. A low buzz and Didn't move means nothing changed, maybe the end of the list.
-
                 Sliding your finger anywhere on the screen always says something. Parts with no buttons say Nothing visible if they're blank, or Picture, no words if something is drawn there, plus where it is.
 
                 When you go home, it turns off and TalkBack works normally.

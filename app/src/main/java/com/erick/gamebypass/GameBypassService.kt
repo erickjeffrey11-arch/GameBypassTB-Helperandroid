@@ -27,7 +27,6 @@ import android.os.Looper
 import android.util.Log
 import android.view.Display
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -86,9 +85,6 @@ class GameBypassService : AccessibilityService() {
     private var currentTexts: Set<String> = emptySet()
     private var checkPending = false
     private var unreadableSince: Long? = null
-    // A scroll waiting for its result: which way, and what was on screen before.
-    private var scrollDirection: String? = null
-    private var beforeScroll: Set<String> = emptySet()
     private var focusedRect: Rect? = null
     private var lastTapAt = 0L
     private var scaleX = 1f
@@ -356,7 +352,7 @@ class GameBypassService : AccessibilityService() {
 
     private fun showItemsLayer() {
         if (itemsLayer != null) return
-        val layer = ItemsLayer()
+        val layer = FrameLayout(this)
         layer.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         val params = overlayParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -671,24 +667,6 @@ class GameBypassService : AccessibilityService() {
             return
         }
 
-        // The result of a scroll: say which way and whether anything moved.
-        val scrolled = scrollDirection
-        if (scrolled != null) {
-            scrollDirection = null
-            val fresh = texts.count { it !in beforeScroll }
-            currentTexts = texts
-            buildItems(items)
-            autoLabel(items)
-            if (fresh > 0) {
-                beep(ok = true)
-                setStatus("Scrolled $scrolled. $fresh new button${if (fresh == 1) "" else "s"}.")
-            } else {
-                beep(ok = false)
-                setStatus("Didn't move. Maybe the end of the list.")
-            }
-            return
-        }
-
         if (!announceCount && similarity(texts, currentTexts) >= 0.7) {
             // Same screen: quietly update names and positions, keeping the same
             // buttons, so TalkBack doesn't lose your place.
@@ -999,7 +977,7 @@ class GameBypassService : AccessibilityService() {
     }
 
     /** Drags a finger from one spot to another, like playing a card or attacking. */
-    private fun dragFrom(from: Rect, to: Rect, duration: Long = 450, quiet: Boolean = false) {
+    private fun dragFrom(from: Rect, to: Rect) {
         lastTapAt = System.currentTimeMillis()
         tapping = true
         itemsLayer?.let { runCatching { wm.removeViewImmediate(it) } }
@@ -1009,11 +987,11 @@ class GameBypassService : AccessibilityService() {
             lineTo(to.exactCenterX(), to.exactCenterY())
         }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 450))
             .build()
         handler.postDelayed({
             val sent = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(g: GestureDescription?) { if (!quiet) beep(ok = true); afterTap() }
+                override fun onCompleted(g: GestureDescription?) { beep(ok = true); afterTap() }
                 override fun onCancelled(g: GestureDescription?) {
                     beep(ok = false); setStatus("The move was cancelled by Android."); afterTap()
                 }
@@ -1365,113 +1343,6 @@ class GameBypassService : AccessibilityService() {
                 }
             }
         }
-    }
-
-    // ------------------------------------------------------ scrolling
-
-    /**
-     * The layer that holds the invisible buttons. It tells TalkBack it can scroll,
-     * and turns TalkBack's scrolling (two-finger swipes and scroll commands) into a
-     * real drag in the game.
-     */
-    private inner class ItemsLayer : FrameLayout(this@GameBypassService) {
-        private var downX = 0f
-        private var downY = 0f
-        private var dragging = false
-        private val minDrag get() = 0.08f * min(width, height)
-
-        init {
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
-            accessibilityDelegate = object : View.AccessibilityDelegate() {
-                override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
-                    super.onInitializeAccessibilityNodeInfo(host, info)
-                    info.className = "android.widget.ScrollView"
-                    info.isScrollable = true
-                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
-                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
-                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP)
-                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN)
-                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT)
-                    info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT)
-                }
-
-                override fun performAccessibilityAction(host: View, action: Int, args: android.os.Bundle?): Boolean {
-                    when (action) {
-                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id,
-                        AccessibilityNodeInfo.ACTION_SCROLL_FORWARD -> scrollGame("down")
-                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id,
-                        AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> scrollGame("up")
-                        // Sideways only from the TalkBack menu, never from a swipe.
-                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id -> scrollGame("right")
-                        AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id -> scrollGame("left")
-                        else -> return super.performAccessibilityAction(host, action, args)
-                    }
-                    return true
-                }
-            }
-        }
-
-        // TalkBack sends a two-finger swipe to the app as a drag. Catch it here,
-        // before the invisible buttons do, and repeat it in the game.
-        override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
-            when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { downX = e.rawX; downY = e.rawY; dragging = false }
-                // Up and down only. Sideways two-finger swipes are left alone,
-                // so they never get in the way of TalkBack's back gesture.
-                MotionEvent.ACTION_MOVE -> if (!dragging &&
-                    kotlin.math.abs(e.rawY - downY) > minDrag &&
-                    kotlin.math.abs(e.rawY - downY) > kotlin.math.abs(e.rawX - downX)
-                ) {
-                    dragging = true
-                    return true
-                }
-            }
-            return false
-        }
-
-        override fun onTouchEvent(e: MotionEvent): Boolean {
-            when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { downX = e.rawX; downY = e.rawY; dragging = false }
-                MotionEvent.ACTION_UP -> {
-                    val dx = e.rawX - downX
-                    val dy = e.rawY - downY
-                    // Fingers moved up = show what's further down, like any app.
-                    if (kotlin.math.abs(dy) > minDrag && kotlin.math.abs(dy) > kotlin.math.abs(dx)) {
-                        scrollGame(if (dy < 0) "down" else "up")
-                    }
-                    dragging = false
-                }
-                MotionEvent.ACTION_CANCEL -> dragging = false
-            }
-            return true
-        }
-    }
-
-    /**
-     * Scrolls the game: "down" shows what's further down (the finger moves up),
-     * "up" goes back. Uses a long, slow drag like a real finger, then reads the
-     * screen again and tells you whether anything moved.
-     */
-    private fun scrollGame(direction: String) {
-        if (!bypassOn || tapping) return
-        val b = wm.currentWindowMetrics.bounds
-        val cx = b.exactCenterX()
-        val cy = b.exactCenterY()
-        val (sx, sy, ex, ey) = when (direction) {
-            "down" -> listOf(cx, b.height() * 0.72f, cx, b.height() * 0.28f)
-            "up" -> listOf(cx, b.height() * 0.28f, cx, b.height() * 0.72f)
-            "right" -> listOf(b.width() * 0.75f, cy, b.width() * 0.25f, cy)
-            else -> listOf(b.width() * 0.25f, cy, b.width() * 0.75f, cy)
-        }
-        scrollDirection = direction
-        beforeScroll = latestItems.map { normKey(it.text) }.toSet()
-        setStatus("Scrolling $direction.")
-        dragFrom(
-            Rect(sx.toInt() - 2, sy.toInt() - 2, sx.toInt() + 2, sy.toInt() + 2),
-            Rect(ex.toInt() - 2, ey.toInt() - 2, ex.toInt() + 2, ey.toInt() + 2),
-            duration = 650,
-            quiet = true
-        )
     }
 
     private fun similarity(a: Set<String>, b: Set<String>): Double {
