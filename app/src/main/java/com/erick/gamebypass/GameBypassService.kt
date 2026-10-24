@@ -85,6 +85,9 @@ class GameBypassService : AccessibilityService() {
     private var currentTexts: Set<String> = emptySet()
     private var checkPending = false
     private var unreadableSince: Long? = null
+    // After a double tap: what was on screen before, to tell if the tap did anything.
+    private var tapBefore: Set<String>? = null
+    private var tapLooks = 0
     private var focusedRect: Rect? = null
     private var lastTapAt = 0L
     private var scaleX = 1f
@@ -324,6 +327,7 @@ class GameBypassService : AccessibilityService() {
 
     private fun turnOff(announce: Boolean) {
         if (!bypassOn) return
+        tapBefore = null
         bypassOn = false
         handler.removeCallbacks(periodicScan)
         setDirectTouch(false, auto = false, speak = false)
@@ -639,8 +643,26 @@ class GameBypassService : AccessibilityService() {
         val announceCount = rescanRequested
         rescanRequested = false
         fun found(n: Int) = if (n == 0) "Found no buttons." else "Found $n button${if (n == 1) "" else "s"}."
+
+        // Did the last double tap do anything? If the screen changed, it was activated.
+        // If not, look once more a second later (some games are slow) before saying
+        // it's not available.
+        var tapResult: String? = null
+        tapBefore?.let { before ->
+            tapLooks++
+            if (texts != before) {
+                tapResult = "Activated."
+                tapBefore = null
+            } else if (tapLooks >= 2) {
+                tapResult = "Not available."
+                tapBefore = null
+            } else {
+                handler.postDelayed({ scan() }, 1000)
+            }
+        }
+
         if (items.isEmpty()) {
-            if (announceCount) setStatus(found(0))
+            if (announceCount) setStatus(found(0)) else tapResult?.let { setStatus(it) }
             emptyScans++
             // Hearthstone never needs automatic direct touch.
             if (emptyScans == 3 && !directTouch && profile != "hearthstone") {
@@ -671,6 +693,7 @@ class GameBypassService : AccessibilityService() {
             // Same screen: quietly update names and positions, keeping the same
             // buttons, so TalkBack doesn't lose your place.
             buildItems(items)
+            tapResult?.let { setStatus(it) }
             return
         }
         val firstTime = currentTexts.isEmpty()
@@ -682,6 +705,7 @@ class GameBypassService : AccessibilityService() {
             when {
                 announceCount -> found(items.size)
                 firstTime -> "Game Bypass Mode. $count."
+                tapResult != null -> "$tapResult Screen changed. $count."
                 else -> "Screen changed. $count."
             }
         )
@@ -1210,7 +1234,8 @@ class GameBypassService : AccessibilityService() {
                     runCatching { wm.updateViewLayout(b, lp) }
                 }
             }
-            speakGame("Keyboard open.")
+            if (tapBefore != null) { tapBefore = null; speakGame("Activated. Keyboard open.") }
+            else speakGame("Keyboard open.")
         } else {
             if (!directTouch) setItemsTouchable(true)
             bar?.let { b ->
@@ -1663,6 +1688,10 @@ class GameBypassService : AccessibilityService() {
         if (attempt == 1) {
             itemsLayer?.let { runCatching { wm.removeViewImmediate(it) } }
             openPassthroughSpot(r)
+            if (!directTouch && !hsInMatch) {
+                tapBefore = latestItems.map { normKey(it.text) }.toSet()
+                tapLooks = 0
+            }
         }
         val path = Path().apply { moveTo(r.exactCenterX(), r.exactCenterY()) }
         // Hold the finger down a little longer; some games ignore very quick taps.
