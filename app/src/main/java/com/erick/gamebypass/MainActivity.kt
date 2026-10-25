@@ -58,6 +58,8 @@ class MainActivity : Activity() {
 
                 If it finds no text three times in a row, it switches to direct touch by itself, and switches back when a menu with text shows up.
 
+                To see more of a list or a row of items, like more slot machines, swipe to the end of the buttons and double tap Scroll forward or Scroll back. It slides the row of the last button you were on, or scrolls up and down if there's no row. Then you hear the new names.
+
                 Sliding your finger anywhere on the screen always says something. Parts with no buttons say Nothing visible if they're blank, or Picture if something is drawn there, plus what it might be, like Picture: coin, chest, and where it is. Those guesses can be wrong on cartoon art.
 
                 When you go home, it turns off and TalkBack works normally.

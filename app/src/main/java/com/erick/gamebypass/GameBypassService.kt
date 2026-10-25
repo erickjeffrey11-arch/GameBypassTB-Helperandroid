@@ -87,6 +87,11 @@ class GameBypassService : AccessibilityService() {
     private var currentTexts: Set<String> = emptySet()
     private var checkPending = false
     private var unreadableSince: Long? = null
+    // Scrolling: the last real button you were on (to find its row), and a scroll
+    // waiting for its result.
+    private var lastRealItem: Item? = null
+    private var scrollPending = false
+    private var beforeScroll: Set<String> = emptySet()
     // Image Labeling: what's in "Picture, no words" spots on the current screen.
     private val pictureLabels = HashMap<String, String>()
     private val labelingNow = HashSet<String>()
@@ -350,6 +355,8 @@ class GameBypassService : AccessibilityService() {
 
     private fun turnOff(announce: Boolean) {
         if (!bypassOn) return
+        scrollPending = false
+        lastRealItem = null
         pictureLabels.clear()
         labelingNow.clear()
         bypassOn = false
@@ -695,6 +702,27 @@ class GameBypassService : AccessibilityService() {
             return
         }
 
+        // The result of a scroll: say the new names, or that it didn't move.
+        if (scrollPending) {
+            scrollPending = false
+            val fresh = items.filter { normKey(it.text) !in beforeScroll && it.text.any { c -> c.isLetter() } }
+            currentTexts = texts
+            buildItems(items)
+            labelPictures()
+            markAsHeard(items)
+            if (fresh.isNotEmpty()) {
+                beep(ok = true)
+                speakGame("Moved. New: " + fresh.take(5).joinToString(", ") { it.text } + ".")
+            } else if (texts != beforeScroll) {
+                beep(ok = true)
+                speakGame("Moved.")
+            } else {
+                beep(ok = false)
+                speakGame("Didn't move. Maybe the end.")
+            }
+            return
+        }
+
         if (!announceCount && similarity(texts, currentTexts) >= 0.7) {
             // Same screen: quietly update names and positions, keeping the same
             // buttons, so TalkBack doesn't lose your place.
@@ -1023,7 +1051,7 @@ class GameBypassService : AccessibilityService() {
     }
 
     /** Drags a finger from one spot to another, like playing a card or attacking. */
-    private fun dragFrom(from: Rect, to: Rect) {
+    private fun dragFrom(from: Rect, to: Rect, duration: Long = 450, quiet: Boolean = false) {
         lastTapAt = System.currentTimeMillis()
         tapping = true
         itemsLayer?.let { runCatching { wm.removeViewImmediate(it) } }
@@ -1033,11 +1061,11 @@ class GameBypassService : AccessibilityService() {
             lineTo(to.exactCenterX(), to.exactCenterY())
         }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 450))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
             .build()
         handler.postDelayed({
             val sent = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(g: GestureDescription?) { beep(ok = true); afterTap() }
+                override fun onCompleted(g: GestureDescription?) { if (!quiet) beep(ok = true); afterTap() }
                 override fun onCancelled(g: GestureDescription?) {
                     beep(ok = false); setStatus("The move was cancelled by Android."); afterTap()
                 }
@@ -1109,6 +1137,13 @@ class GameBypassService : AccessibilityService() {
 
     /** Double tap on an item. Real Android text boxes get focused directly; everything else is tapped. */
     private fun activateItem(item: Item) {
+        if (isScrollItem(item)) {
+            val now = System.currentTimeMillis()
+            if (now - lastTapAt < 400) return
+            lastTapAt = now
+            scrollGame(forward = item.text == SCROLL_FORWARD)
+            return
+        }
         val node = item.node
         if (node != null) {
             val now = System.currentTimeMillis()
@@ -1491,6 +1526,7 @@ class GameBypassService : AccessibilityService() {
                         focusedRect = item?.rect
                         focusedView = host
                         focusedItem = item
+                        if (item != null && !isScrollItem(item) && !isAreaItem(item)) lastRealItem = item
                     }
                     // Way 2: TalkBack's double tap arrives as a "click" action. Tap the game.
                     AccessibilityNodeInfo.ACTION_CLICK -> {
@@ -1520,7 +1556,7 @@ class GameBypassService : AccessibilityService() {
         // big empty parts of the screen, so sliding your finger anywhere says something.
         val areas = growAreas(items.map { it.rect }, screen)
         val empties = emptyAreas(areas, screen)
-        val all = empties.map { it to it.rect } + items.zip(areas)
+        val all = empties.map { it to it.rect } + items.zip(areas) + scrollItems(screen).map { it to it.rect }
         val old = itemViews.toMutableList()
         val fresh = mutableListOf<Pair<Item, View>>()
         val near = screen.width() * 0.12f
@@ -1654,6 +1690,66 @@ class GameBypassService : AccessibilityService() {
             if (kotlin.math.abs(lum(px[y * sw + x]) - lum(px[(y + 1) * sw + x])) > 25) different++
         }
         return different.toFloat() / pairs < 0.02f
+    }
+
+    // ------------------------------------------------------ scrolling
+
+    private val SCROLL_FORWARD = "Scroll forward"
+    private val SCROLL_BACK = "Scroll back"
+
+    private fun isScrollItem(item: Item) = item.text == SCROLL_FORWARD || item.text == SCROLL_BACK
+    private fun isAreaItem(item: Item) =
+        item.text.startsWith("Nothing visible, ") || item.text.startsWith("Picture")
+
+    /**
+     * The two scroll buttons. They come last in the swipe order. On the screen they're
+     * small spots at the bottom corners, so they rarely get in the way of exploring.
+     */
+    private fun scrollItems(screen: Rect): List<Item> {
+        val size = (24 * resources.displayMetrics.density).toInt()
+        val bottom = screen.bottom - stripHeight() - size * 2
+        return listOf(
+            Item(SCROLL_FORWARD, Rect(screen.right - size, bottom, screen.right, bottom + size)),
+            Item(SCROLL_BACK, Rect(screen.left, bottom, screen.left + size, bottom + size))
+        )
+    }
+
+    /**
+     * Slides the game's list a full screen. If the last button you were on sits in a
+     * row with other items (like a row of slot machines), that row slides sideways.
+     * Otherwise the screen scrolls up or down. You never make a gesture: the helper
+     * does the drag itself, so it can't trigger TalkBack's back gesture.
+     */
+    private fun scrollGame(forward: Boolean) {
+        if (!bypassOn || tapping || scrollPending) return
+        val b = wm.currentWindowMetrics.bounds
+        val ref = lastRealItem
+        val rowMates = ref?.let { r ->
+            latestItems.count { kotlin.math.abs(it.rect.centerY() - r.rect.centerY()) < max(r.rect.height(), b.height() / 20) }
+        } ?: 0
+        val sideways = ref != null && rowMates >= 2
+        val (from, to) = if (sideways) {
+            val y = ref!!.rect.exactCenterY()
+            val right = b.width() * 0.88f
+            val left = b.width() * 0.12f
+            if (forward) Pair(right to y, left to y) else Pair(left to y, right to y)
+        } else {
+            val x = b.exactCenterX()
+            val low = b.height() * 0.80f
+            val high = b.height() * 0.20f
+            if (forward) Pair(x to low, x to high) else Pair(x to high, x to low)
+        }
+        beforeScroll = latestItems.map { normKey(it.text) }.toSet()
+        scrollPending = true
+        speakGame(if (forward) "Scrolling forward." else "Scrolling back.")
+        dragFrom(
+            Rect(from.first.toInt() - 2, from.second.toInt() - 2, from.first.toInt() + 2, from.second.toInt() + 2),
+            Rect(to.first.toInt() - 2, to.second.toInt() - 2, to.first.toInt() + 2, to.second.toInt() + 2),
+            duration = 500,
+            quiet = true
+        )
+        // If the screen never gets read again (something went wrong), don't stay stuck.
+        handler.postDelayed({ scrollPending = false }, 5000)
     }
 
     /**
