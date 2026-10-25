@@ -49,16 +49,15 @@ class MainActivity : Activity() {
                 How it works:
                 Keep TalkBack on. Game Bypass stays out of apps TalkBack can already read. When you open a game TalkBack can't read, you'll hear Game Bypass Mode on, and how many items it found. Swipe through them, or slide your finger around the screen. Double tap an item to press it in the game. When new words pop up on the screen you're on, like You win, they're said right away. You can pick the speech engine for these announcements in the Announcement voice section below.
 
-                Along the very bottom edge of the screen there's a thin strip of buttons: Rescan, Direct touch, and Pause. Swipe to reach them.
-                Rescan reads the screen again.
+                Along the very bottom edge of the screen there's a thin strip of buttons: Scroll left, Direct touch, and Scroll right. Swipe to reach them.
+                Scroll left and Scroll right slide the row of the last button you were on, like a row of slot machines, then tell you the new names.
                 Direct touch sends your taps straight to the game. Turn it off with the same button.
                 While direct touch is on, it keeps watching the screen and says any new words the game shows, like Swipe right to dodge, so you can just do it.
-                Pause turns Game Bypass Mode off for this game until you leave it.
                 To keep Game Bypass off in an app for good, use Add an app in the Apps section below.
 
                 If it finds no text three times in a row, it switches to direct touch by itself, and switches back when a menu with text shows up.
 
-                To see more of a list or a row of items, like more slot machines, swipe to the end of the buttons and double tap Scroll forward or Scroll back. It slides the row of the last button you were on, or scrolls up and down if there's no row or the row doesn't move. Then you hear the new names. By touch, Scroll back is in the very top left corner and Scroll forward in the very top right.
+                To scroll a list up or down, swipe to the end of the buttons and double tap Scroll up or Scroll down. By touch, Scroll up is in the very top left corner and Scroll down in the very top right. Then you hear the new names.
 
                 Sliding your finger anywhere on the screen always says something. Parts with no buttons say Nothing visible if they're blank, or Picture if something is drawn there, plus what it might be, like Picture: coin, chest, and where it is. Those guesses can be wrong on cartoon art.
 

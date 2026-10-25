@@ -91,9 +91,6 @@ class GameBypassService : AccessibilityService() {
     // waiting for its result.
     private var lastRealItem: Item? = null
     private var scrollPending = false
-    private var scrollForward = true
-    private var scrollWasSideways = false
-    private var scrollTriedOther = false
     private var beforeScroll: Set<String> = emptySet()
     // Image Labeling: what's in "Picture, no words" spots on the current screen.
     private val pictureLabels = HashMap<String, String>()
@@ -459,13 +456,7 @@ class GameBypassService : AccessibilityService() {
             layoutParams = LinearLayout.LayoutParams(0, stripHeight(), 1f)
         }
         bar.addView(status)
-        bar.addView(invisibleButton("Rescan") {
-            currentTexts = emptySet()
-            emptyScans = 0
-            rescanRequested = true
-            setStatus("Rescanning.")
-            scan()
-        })
+        bar.addView(invisibleButton("Scroll left") { scrollGame("left") })
         val direct = invisibleButton("Direct touch, off") {
             setDirectTouch(!directTouch, auto = false, speak = true)
         }
@@ -474,10 +465,7 @@ class GameBypassService : AccessibilityService() {
             bar.addView(invisibleButton("End turn") { endTurn() })
             bar.addView(invisibleButton("Save screen for help") { saveScreenForHelp() })
         }
-        bar.addView(invisibleButton("Pause Game Bypass for this game") {
-            pausedPackage = currentPackage
-            turnOff(announce = true)
-        })
+        bar.addView(invisibleButton("Scroll right") { scrollGame("right") })
 
         val params = overlayParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -719,11 +707,6 @@ class GameBypassService : AccessibilityService() {
             } else if (texts != beforeScroll) {
                 beep(ok = true)
                 speakGame("Moved.")
-            } else if (scrollWasSideways && !scrollTriedOther) {
-                // Sideways didn't move anything: this game's list may go up and down.
-                // Try that once before giving up.
-                scrollTriedOther = true
-                scrollGame(scrollForward, forceUpDown = true)
             } else {
                 beep(ok = false)
                 speakGame("Didn't move. Maybe the end.")
@@ -1149,7 +1132,7 @@ class GameBypassService : AccessibilityService() {
             val now = System.currentTimeMillis()
             if (now - lastTapAt < 400) return
             lastTapAt = now
-            scrollGame(forward = item.text == SCROLL_FORWARD)
+            scrollGame(if (item.text == SCROLL_DOWN) "down" else "up")
             return
         }
         val node = item.node
@@ -1702,56 +1685,51 @@ class GameBypassService : AccessibilityService() {
 
     // ------------------------------------------------------ scrolling
 
-    private val SCROLL_FORWARD = "Scroll forward"
-    private val SCROLL_BACK = "Scroll back"
+    private val SCROLL_DOWN = "Scroll down"
+    private val SCROLL_UP = "Scroll up"
 
-    private fun isScrollItem(item: Item) = item.text == SCROLL_FORWARD || item.text == SCROLL_BACK
+    private fun isScrollItem(item: Item) = item.text == SCROLL_DOWN || item.text == SCROLL_UP
     private fun isAreaItem(item: Item) =
         item.text.startsWith("Nothing visible, ") || item.text.startsWith("Picture")
 
     /**
      * The two scroll buttons. They come last in the swipe order. On the screen they're
-     * small spots in the very top corners: Scroll back top left, Scroll forward top right.
+     * small spots in the very top corners: Scroll up top left, Scroll down top right.
      */
     private fun scrollItems(screen: Rect): List<Item> {
         val size = (16 * resources.displayMetrics.density).toInt()
         return listOf(
-            Item(SCROLL_FORWARD, Rect(screen.right - size, screen.top, screen.right, screen.top + size)),
-            Item(SCROLL_BACK, Rect(screen.left, screen.top, screen.left + size, screen.top + size))
+            Item(SCROLL_UP, Rect(screen.left, screen.top, screen.left + size, screen.top + size)),
+            Item(SCROLL_DOWN, Rect(screen.right - size, screen.top, screen.right, screen.top + size))
         )
     }
 
     /**
-     * Slides the game's list a full screen. If the last button you were on sits in a
-     * row with other items (like a row of slot machines), that row slides sideways.
-     * Otherwise the screen scrolls up or down. You never make a gesture: the helper
-     * does the drag itself, so it can't trigger TalkBack's back gesture.
+     * Slides the game a full screen in one direction. You never make a gesture: the
+     * helper does the drag itself, so it can't trigger TalkBack's back gesture.
+     *  - up / down: drags the middle of the screen up or down.
+     *  - left / right: slides the row of the last button you were on (like a row of
+     *    slot machines), or the middle of the screen if you haven't been on one yet.
+     * "Right" shows what's further right, so the finger moves from right to left.
      */
-    private fun scrollGame(forward: Boolean, forceUpDown: Boolean = false) {
-        if (!bypassOn || tapping || (scrollPending && !forceUpDown)) return
+    private fun scrollGame(direction: String) {
+        if (!bypassOn || tapping || scrollPending) return
         val b = wm.currentWindowMetrics.bounds
-        val ref = lastRealItem
-        val rowMates = ref?.let { r ->
-            latestItems.count { kotlin.math.abs(it.rect.centerY() - r.rect.centerY()) < max(r.rect.height(), b.height() / 20) }
-        } ?: 0
-        val sideways = !forceUpDown && ref != null && rowMates >= 2
-        scrollForward = forward
-        scrollWasSideways = sideways
-        if (!forceUpDown) scrollTriedOther = false
-        val (from, to) = if (sideways) {
-            val y = ref!!.rect.exactCenterY()
-            val right = b.width() * 0.88f
-            val left = b.width() * 0.12f
-            if (forward) Pair(right to y, left to y) else Pair(left to y, right to y)
-        } else {
-            val x = b.exactCenterX()
-            val low = b.height() * 0.80f
-            val high = b.height() * 0.20f
-            if (forward) Pair(x to low, x to high) else Pair(x to high, x to low)
+        val x = b.exactCenterX()
+        val y = lastRealItem?.rect?.exactCenterY() ?: b.exactCenterY()
+        val right = b.width() * 0.88f
+        val left = b.width() * 0.12f
+        val low = b.height() * 0.80f
+        val high = b.height() * 0.20f
+        val (from, to) = when (direction) {
+            "down" -> Pair(x to low, x to high)
+            "up" -> Pair(x to high, x to low)
+            "right" -> Pair(right to y, left to y)
+            else -> Pair(left to y, right to y)
         }
-        if (!forceUpDown) beforeScroll = latestItems.map { normKey(it.text) }.toSet()
+        beforeScroll = latestItems.map { normKey(it.text) }.toSet()
         scrollPending = true
-        if (!forceUpDown) speakGame(if (forward) "Scrolling forward." else "Scrolling back.")
+        speakGame("Scrolling $direction.")
         dragFrom(
             Rect(from.first.toInt() - 2, from.second.toInt() - 2, from.first.toInt() + 2, from.second.toInt() + 2),
             Rect(to.first.toInt() - 2, to.second.toInt() - 2, to.first.toInt() + 2, to.second.toInt() + 2),
