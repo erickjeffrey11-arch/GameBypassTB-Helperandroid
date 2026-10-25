@@ -91,6 +91,9 @@ class GameBypassService : AccessibilityService() {
     // waiting for its result.
     private var lastRealItem: Item? = null
     private var scrollPending = false
+    private var scrollForward = true
+    private var scrollWasSideways = false
+    private var scrollTriedOther = false
     private var beforeScroll: Set<String> = emptySet()
     // Image Labeling: what's in "Picture, no words" spots on the current screen.
     private val pictureLabels = HashMap<String, String>()
@@ -716,6 +719,11 @@ class GameBypassService : AccessibilityService() {
             } else if (texts != beforeScroll) {
                 beep(ok = true)
                 speakGame("Moved.")
+            } else if (scrollWasSideways && !scrollTriedOther) {
+                // Sideways didn't move anything: this game's list may go up and down.
+                // Try that once before giving up.
+                scrollTriedOther = true
+                scrollGame(scrollForward, forceUpDown = true)
             } else {
                 beep(ok = false)
                 speakGame("Didn't move. Maybe the end.")
@@ -1703,14 +1711,13 @@ class GameBypassService : AccessibilityService() {
 
     /**
      * The two scroll buttons. They come last in the swipe order. On the screen they're
-     * small spots at the bottom corners, so they rarely get in the way of exploring.
+     * small spots in the very top corners: Scroll back top left, Scroll forward top right.
      */
     private fun scrollItems(screen: Rect): List<Item> {
-        val size = (24 * resources.displayMetrics.density).toInt()
-        val bottom = screen.bottom - stripHeight() - size * 2
+        val size = (16 * resources.displayMetrics.density).toInt()
         return listOf(
-            Item(SCROLL_FORWARD, Rect(screen.right - size, bottom, screen.right, bottom + size)),
-            Item(SCROLL_BACK, Rect(screen.left, bottom, screen.left + size, bottom + size))
+            Item(SCROLL_FORWARD, Rect(screen.right - size, screen.top, screen.right, screen.top + size)),
+            Item(SCROLL_BACK, Rect(screen.left, screen.top, screen.left + size, screen.top + size))
         )
     }
 
@@ -1720,14 +1727,17 @@ class GameBypassService : AccessibilityService() {
      * Otherwise the screen scrolls up or down. You never make a gesture: the helper
      * does the drag itself, so it can't trigger TalkBack's back gesture.
      */
-    private fun scrollGame(forward: Boolean) {
-        if (!bypassOn || tapping || scrollPending) return
+    private fun scrollGame(forward: Boolean, forceUpDown: Boolean = false) {
+        if (!bypassOn || tapping || (scrollPending && !forceUpDown)) return
         val b = wm.currentWindowMetrics.bounds
         val ref = lastRealItem
         val rowMates = ref?.let { r ->
             latestItems.count { kotlin.math.abs(it.rect.centerY() - r.rect.centerY()) < max(r.rect.height(), b.height() / 20) }
         } ?: 0
-        val sideways = ref != null && rowMates >= 2
+        val sideways = !forceUpDown && ref != null && rowMates >= 2
+        scrollForward = forward
+        scrollWasSideways = sideways
+        if (!forceUpDown) scrollTriedOther = false
         val (from, to) = if (sideways) {
             val y = ref!!.rect.exactCenterY()
             val right = b.width() * 0.88f
@@ -1739,9 +1749,9 @@ class GameBypassService : AccessibilityService() {
             val high = b.height() * 0.20f
             if (forward) Pair(x to low, x to high) else Pair(x to high, x to low)
         }
-        beforeScroll = latestItems.map { normKey(it.text) }.toSet()
+        if (!forceUpDown) beforeScroll = latestItems.map { normKey(it.text) }.toSet()
         scrollPending = true
-        speakGame(if (forward) "Scrolling forward." else "Scrolling back.")
+        if (!forceUpDown) speakGame(if (forward) "Scrolling forward." else "Scrolling back.")
         dragFrom(
             Rect(from.first.toInt() - 2, from.second.toInt() - 2, from.first.toInt() + 2, from.second.toInt() + 2),
             Rect(to.first.toInt() - 2, to.second.toInt() - 2, to.first.toInt() + 2, to.second.toInt() + 2),
