@@ -61,8 +61,6 @@ class MainActivity : Activity() {
 
                 Sliding your finger anywhere on the screen always says something. Parts with no buttons say Nothing visible if they're blank, or Picture if something is drawn there, plus what it might be, like Picture: coin, chest, and where it is. Those guesses can be wrong on cartoon art.
 
-                Pokémon GO: on the catch screen, double tap the picture spot where the Pokémon is, usually Picture, middle, and the helper flicks the Poké Ball up to it. It can miss if the Pokémon moves.
-
                 When you go home, it turns off and TalkBack works normally.
             """.trimIndent()
         })

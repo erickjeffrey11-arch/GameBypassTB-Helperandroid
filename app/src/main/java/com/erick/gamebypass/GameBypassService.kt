@@ -1143,14 +1143,6 @@ class GameBypassService : AccessibilityService() {
 
     /** Double tap on an item. Real Android text boxes get focused directly; everything else is tapped. */
     private fun activateItem(item: Item) {
-        // Pokémon GO: double tapping a picture spot (where the Pokémon is) throws the ball there.
-        if (currentPackage == POKEMON_GO && isAreaItem(item)) {
-            val now = System.currentTimeMillis()
-            if (now - lastTapAt < 400) return
-            lastTapAt = now
-            throwBall(item.rect)
-            return
-        }
         if (isScrollItem(item)) {
             val now = System.currentTimeMillis()
             if (now - lastTapAt < 400) return
@@ -1770,31 +1762,6 @@ class GameBypassService : AccessibilityService() {
         )
         // If the screen never gets read again (something went wrong), don't stay stuck.
         handler.postDelayed({ scrollPending = false }, 5000)
-    }
-
-    // ------------------------------------------------------ Pokémon GO
-
-    private val POKEMON_GO = "com.nianticlabs.pokemongo"
-
-    /**
-     * Flicks the Poké Ball from the bottom middle of the screen up to the spot you
-     * double tapped, like a sighted player's swipe. A quick flick, so the ball flies.
-     */
-    private fun throwBall(target: Rect) {
-        if (!bypassOn || tapping) return
-        val b = wm.currentWindowMetrics.bounds
-        val ballX = b.exactCenterX()
-        val ballY = b.height() * 0.88f
-        // Aim at the middle of the spot, but never below the ball.
-        val aimX = target.exactCenterX()
-        val aimY = min(target.exactCenterY(), ballY - b.height() * 0.25f)
-        speakGame("Throwing.")
-        dragFrom(
-            Rect(ballX.toInt() - 2, ballY.toInt() - 2, ballX.toInt() + 2, ballY.toInt() + 2),
-            Rect(aimX.toInt() - 2, aimY.toInt() - 2, aimX.toInt() + 2, aimY.toInt() + 2),
-            duration = 180,
-            quiet = true
-        )
     }
 
     /** The item at a spot: the one whose middle is closest, in the same column. */
