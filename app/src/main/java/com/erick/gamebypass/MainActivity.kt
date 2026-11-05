@@ -57,7 +57,7 @@ class MainActivity : Activity() {
 
                 If it finds no text three times in a row, it switches to direct touch by itself, and switches back when a menu with text shows up.
 
-                To scroll a list up or down, swipe to the end of the buttons and double tap Scroll up or Scroll down. By touch, Scroll up is in the very top left corner and Scroll down in the very top right. Then you hear the new names.
+                To scroll up or down, swipe to the end of the buttons and double tap Scroll up or Scroll down. By touch, Scroll up is in the very top left corner and Scroll down in the very top right. It moves the column of the last item you were on by about one item, like one number on a birth date wheel, then tells you what's there now, like Now: 1999.
 
                 Sliding your finger anywhere on the screen always says something. Parts with no buttons say Nothing visible if they're blank, or Picture if something is drawn there, plus what it might be, like Picture: coin, chest, and where it is. Those guesses can be wrong on cartoon art.
 

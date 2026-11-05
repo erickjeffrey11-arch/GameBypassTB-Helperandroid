@@ -92,6 +92,11 @@ class GameBypassService : AccessibilityService() {
     private var lastRealItem: Item? = null
     private var scrollPending = false
     private var beforeScroll: Set<String> = emptySet()
+    // Small up/down steps (like a birth date wheel): the spot you were on, the exact
+    // words there before the step, and every exact word on screen before.
+    private var stepAnchor: Rect? = null
+    private var stepTextBefore: String? = null
+    private var rawBefore: Set<String> = emptySet()
     // Image Labeling: what's in "Picture, no words" spots on the current screen.
     private val pictureLabels = HashMap<String, String>()
     private val labelingNow = HashSet<String>()
@@ -701,7 +706,17 @@ class GameBypassService : AccessibilityService() {
             buildItems(items)
             labelPictures()
             markAsHeard(items)
-            if (fresh.isNotEmpty()) {
+            val anchor = stepAnchor
+            stepAnchor = null
+            val nowAtSpot = anchor?.let { itemAt(it, items)?.text }
+            if (anchor != null && nowAtSpot != null && nowAtSpot != stepTextBefore) {
+                // A small step: say what's at your spot now, like "Now: 1999".
+                beep(ok = true)
+                speakGame("Now: $nowAtSpot.")
+            } else if (anchor != null && items.map { it.text }.toSet() != rawBefore) {
+                beep(ok = true)
+                speakGame("Moved.")
+            } else if (fresh.isNotEmpty()) {
                 beep(ok = true)
                 speakGame("Moved. New: " + fresh.take(5).joinToString(", ") { it.text } + ".")
             } else if (texts != beforeScroll) {
@@ -1715,29 +1730,48 @@ class GameBypassService : AccessibilityService() {
     private fun scrollGame(direction: String) {
         if (!bypassOn || tapping || scrollPending) return
         val b = wm.currentWindowMetrics.bounds
-        val x = b.exactCenterX()
-        val y = lastRealItem?.rect?.exactCenterY() ?: b.exactCenterY()
+        val ref = lastRealItem?.rect
+        val y = ref?.exactCenterY() ?: b.exactCenterY()
         val right = b.width() * 0.88f
         val left = b.width() * 0.12f
-        val low = b.height() * 0.80f
-        val high = b.height() * 0.20f
-        val (from, to) = when (direction) {
-            "down" -> Pair(x to low, x to high)
-            "up" -> Pair(x to high, x to low)
-            "right" -> Pair(right to y, left to y)
-            else -> Pair(left to y, right to y)
+        val upDown = direction == "up" || direction == "down"
+        val (from, to) = if (upDown) {
+            // Small step in the column of the last item you were on (like the Year
+            // wheel): about one item's height, slow, so it moves one number at a time.
+            val x = ref?.exactCenterX() ?: b.exactCenterX()
+            val minStep = 48 * resources.displayMetrics.density
+            val step = max(minStep, (ref?.height() ?: 0) * 1.3f)
+            val start = y
+            // "Scroll down" shows what's below: the finger moves up.
+            val end = if (direction == "down") start - step else start + step
+            Pair(x to start, x to end.coerceIn(b.height() * 0.05f, b.height() * 0.95f))
+        } else {
+            if (direction == "right") Pair(right to y, left to y) else Pair(left to y, right to y)
         }
         beforeScroll = latestItems.map { normKey(it.text) }.toSet()
+        rawBefore = latestItems.map { it.text }.toSet()
+        stepAnchor = if (upDown) Rect(ref ?: Rect(b.centerX() - 1, b.centerY() - 1, b.centerX() + 1, b.centerY() + 1)) else null
+        stepTextBefore = stepAnchor?.let { a -> itemAt(a)?.text }
         scrollPending = true
         speakGame("Scrolling $direction.")
         dragFrom(
             Rect(from.first.toInt() - 2, from.second.toInt() - 2, from.first.toInt() + 2, from.second.toInt() + 2),
             Rect(to.first.toInt() - 2, to.second.toInt() - 2, to.first.toInt() + 2, to.second.toInt() + 2),
-            duration = 500,
+            duration = if (upDown) 600 else 500,
             quiet = true
         )
         // If the screen never gets read again (something went wrong), don't stay stuck.
         handler.postDelayed({ scrollPending = false }, 5000)
+    }
+
+    /** The item at a spot: the one whose middle is closest, in the same column. */
+    private fun itemAt(spot: Rect, list: List<Item> = latestItems): Item? {
+        val cx = spot.centerX()
+        val cy = spot.centerY()
+        val maxDx = max(spot.width(), (48 * resources.displayMetrics.density).toInt())
+        return list.filter { kotlin.math.abs(it.rect.centerX() - cx) <= maxDx }
+            .minByOrNull { kotlin.math.abs(it.rect.centerY() - cy) }
+            ?.takeIf { kotlin.math.abs(it.rect.centerY() - cy) <= max(spot.height(), (48 * resources.displayMetrics.density).toInt()) }
     }
 
     /**
