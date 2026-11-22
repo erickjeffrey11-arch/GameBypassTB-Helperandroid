@@ -55,7 +55,7 @@ class MainActivity : Activity() {
                 While direct touch is on, it keeps watching the screen and says any new words the game shows, like Swipe right to dodge, so you can just do it.
                 To keep Game Bypass off in an app for good, use Add an app in the Apps section below.
 
-                If it finds no text three times in a row, it switches to direct touch by itself, and switches back when a menu with text shows up.
+                Once a game has shown some words, if it then finds no text three times in a row, it switches to direct touch by itself, and switches back when a menu with text shows up. It won't do this while a game is still loading.
 
                 To scroll up or down, swipe to the end of the buttons and double tap Scroll up or Scroll down. By touch, Scroll up is in the very top left corner and Scroll down in the very top right. It moves the column of the last item you were on by about one item, like one number on a birth date wheel, then tells you what's there now, like Now: 1999.
 

@@ -84,6 +84,9 @@ class GameBypassService : AccessibilityService() {
     private var scanning = false
     private var tapping = false
     private var emptyScans = 0
+    // Has this game shown any words since Game Bypass turned on? A game that's still
+    // loading has a blank screen, and that must not switch on direct touch by itself.
+    private var seenTextSinceOn = false
     private var currentTexts: Set<String> = emptySet()
     private var checkPending = false
     private var unreadableSince: Long? = null
@@ -345,6 +348,7 @@ class GameBypassService : AccessibilityService() {
         directTouch = false
         directTouchAuto = false
         emptyScans = 0
+        seenTextSinceOn = false
         currentTexts = emptySet()
         handler.removeCallbacks(removeBarRunnable)
         removeControlBar()
@@ -673,13 +677,16 @@ class GameBypassService : AccessibilityService() {
         if (items.isEmpty()) {
             if (announceCount) setStatus(found(0))
             emptyScans++
-            // Hearthstone never needs automatic direct touch.
-            if (emptyScans == 3 && !directTouch && profile != "hearthstone") {
+            // Hearthstone never needs automatic direct touch. Only switch automatically
+            // once the game has shown words at least once, so a blank loading screen
+            // right after the game opens doesn't turn direct touch on.
+            if (emptyScans == 3 && seenTextSinceOn && !directTouch && profile != "hearthstone") {
                 setDirectTouch(true, auto = true, speak = true)
             }
             return
         }
         emptyScans = 0
+        seenTextSinceOn = true
 
         if (profile == "hearthstone" && !directTouch && handleHearthstone(items)) {
             if (announceCount) setStatus(found(hsEntries.count { it.kind != K.HEADING }))
