@@ -281,13 +281,17 @@ class GameBypassService : AccessibilityService() {
         val unreadable = when {
             pkg in ignoredPackages || pkg in appList("never") -> false
             profile == "hearthstone" || pkg in appList("always") -> true
+            // Games always get Game Bypass Mode, even if TalkBack can read a few
+            // things in them: making games playable is what this app is for.
+            game -> true
             pkg in appList("accessible") -> false
             else -> readable <= 1
         }
         Log.i(tag, "Front app $pkg readable=$readable game=$game unreadable=$unreadable bypass=$bypassOn")
 
         if (unreadable && !bypassOn && pausedPackage != pkg) {
-            val instant = profile == "hearthstone" || pkg in appList("always")
+            // Games turn it on right away, the moment they open.
+            val instant = game || profile == "hearthstone" || pkg in appList("always")
             // Patience: the screen has to stay unreadable for a moment, so loading
             // screens and splash logos don't turn it on.
             val wait = if (game) 1500L else 3000L

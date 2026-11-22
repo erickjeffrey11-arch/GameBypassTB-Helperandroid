@@ -47,7 +47,7 @@ class MainActivity : Activity() {
                 3. If Android says it's a restricted setting: go to Settings, Apps, Game Bypass TB Helper, then the More options menu at the top right, and choose Allow restricted settings. Then try step 2 again.
 
                 How it works:
-                Keep TalkBack on. Game Bypass stays out of apps TalkBack can already read. When you open a game TalkBack can't read, you'll hear Game Bypass Mode on, and how many items it found. Swipe through them, or slide your finger around the screen. Double tap an item to press it in the game. When new words pop up on the screen you're on, like You win, they're said right away. You can pick the speech engine for these announcements in the Announcement voice section below.
+                Keep TalkBack on. Game Bypass stays out of apps TalkBack can already read, but always works in games. When you open a game, Game Bypass Mode turns on right away. Other apps TalkBack can't read get it too, after a few seconds. You'll hear Game Bypass Mode on, and how many items it found. Swipe through them, or slide your finger around the screen. Double tap an item to press it in the game. When new words pop up on the screen you're on, like You win, they're said right away. You can pick the speech engine for these announcements in the Announcement voice section below.
 
                 Along the very bottom edge of the screen there's a thin strip of buttons: Scroll left, Direct touch, and Scroll right. Swipe to reach them.
                 Scroll left and Scroll right slide the row of the last button you were on, like a row of slot machines, then tell you the new names.
